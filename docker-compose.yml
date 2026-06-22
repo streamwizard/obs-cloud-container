@@ -1,0 +1,23 @@
+services:
+  obs-kiosk:
+    build: .
+    image: obs-kiosk:latest
+    container_name: obs-kiosk-1
+    init: true
+    restart: unless-stopped
+    runtime: nvidia
+    shm_size: "2gb"
+    cap_add:
+      - SYS_ADMIN
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      RESOLUTION: "1920x1080"
+      GPU_BUSID: "PCI:0:16:0"
+    ports:
+      - "6080:6080"
+      - "5900:5900"
+      - "4455:4455"
+    volumes:
+      - /home/jochemwhite/.config/obs-studio:/home/app/.config/obs-studio
+    stop_grace_period: 10s
