@@ -131,9 +131,43 @@ for i in $(seq 1 20); do
 done
 websockify "$NOVNC_PORT" "localhost:$VNC_PORT" >/tmp/websockify.log 2>&1 &
 
-log "launching OBS (idle, no auto-stream)"
+mkdir -p "$APP_HOME/media"
+chown app:app "$APP_HOME/media"
+
+# Jail OBS in its own mount namespace so file pickers (Add Source, Open,
+# Import, ...) can only see its config/cache and the media folder, not the
+# rest of the image. Everything else stays read-only or absent. /dev and
+# /etc are bound in whole (no secrets live there in this image) so GPU
+# devices, fonts, certs and NSS lookups keep working.
+BWRAP_ARGS=(
+  --unshare-pid
+  --die-with-parent
+  --proc /proc
+  --dev-bind /dev /dev
+  --ro-bind /usr /usr
+  --ro-bind /etc /etc
+)
+[ -d /sys ] && BWRAP_ARGS+=(--ro-bind /sys /sys)
+for d in bin sbin lib lib64; do
+  if [ -L "/$d" ]; then
+    BWRAP_ARGS+=(--symlink "$(readlink "/$d")" "/$d")
+  elif [ -d "/$d" ]; then
+    BWRAP_ARGS+=(--ro-bind "/$d" "/$d")
+  fi
+done
+[ -d /tmp/.X11-unix ] && BWRAP_ARGS+=(--bind /tmp/.X11-unix /tmp/.X11-unix)
+BWRAP_ARGS+=(
+  --bind "$XDG" "$XDG"
+  --dir "$APP_HOME"
+  --bind "$APP_HOME/.config/obs-studio" "$APP_HOME/.config/obs-studio"
+  --bind "$APP_HOME/.cache" "$APP_HOME/.cache"
+  --bind "$APP_HOME/media" "$APP_HOME/media"
+  --chdir "$APP_HOME"
+)
+
+log "launching OBS (idle, no auto-stream), jailed via bwrap"
 rm -rf "$APP_HOME/.config/obs-studio/.sentinel" 2>/dev/null || true
-as_app dbus-run-session -- obs --disable-missing-files-check &
+as_app dbus-run-session -- bwrap "${BWRAP_ARGS[@]}" obs --disable-missing-files-check &
 OBS_PID=$!
 
 ( for i in $(seq 1 30); do

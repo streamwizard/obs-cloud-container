@@ -21,6 +21,7 @@ RUN apt-get update \
         pulseaudio pulseaudio-utils \
         fonts-dejavu-core \
         libgl1 \
+        bubblewrap \
         obs-studio \
  && apt-get purge -y software-properties-common gpg-agent \
  && apt-get autoremove -y \
@@ -55,7 +56,7 @@ RUN apt-get update \
 RUN userdel -r ubuntu 2>/dev/null || true; groupdel ubuntu 2>/dev/null || true; \
     groupadd -g 1000 app && \
     useradd -u 1000 -g 1000 -m -d /home/app -s /bin/bash app && \
-    mkdir -p /home/app/.config/openbox /home/app/.config/obs-studio && \
+    mkdir -p /home/app/.config/openbox /home/app/.config/obs-studio /home/app/media && \
     touch /usr/bin/debug.log && chown app:app /usr/bin/debug.log && \
     chown root:root /usr/lib/x86_64-linux-gnu/obs-plugins/chrome-sandbox && \
     chmod 4755 /usr/lib/x86_64-linux-gnu/obs-plugins/chrome-sandbox
