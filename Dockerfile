@@ -61,6 +61,18 @@ RUN userdel -r ubuntu 2>/dev/null || true; groupdel ubuntu 2>/dev/null || true; 
     chown root:root /usr/lib/x86_64-linux-gnu/obs-plugins/chrome-sandbox && \
     chmod 4755 /usr/lib/x86_64-linux-gnu/obs-plugins/chrome-sandbox
 
+# bwrap (entrypoint.sh) runs as the non-root app user, which loses container
+# capabilities on the uid switch. A file capability on the binary itself
+# restores just CAP_SYS_ADMIN at exec time, which bwrap needs to create its
+# own user/mount namespace (Docker's seccomp profile requires it for the
+# CLONE_NEWUSER clone flag, regardless of the calling process's uid).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libcap2-bin \
+ && setcap cap_sys_admin=ep /usr/bin/bwrap \
+ && apt-get purge -y libcap2-bin \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY --chown=app:app rc.xml /home/app/.config/openbox/rc.xml
 RUN chown -R app:app /home/app
 
