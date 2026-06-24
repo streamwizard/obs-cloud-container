@@ -91,6 +91,20 @@ sed -e "s/__WIDTH__/$WIDTH/" -e "s/__HEIGHT__/$HEIGHT/" \
     -e "s#__BUSID__#$GPU_BUSID#" \
     /etc/X11/xorg.conf.template > /etc/X11/xorg.conf
 
+# A prior Xorg run can leave a stale lock behind if the container was
+# killed rather than stopped cleanly (restart: unless-stopped reuses the
+# same writable layer, so /tmp isn't wiped between runs).
+DISPLAY_NUM_BARE="${DISPLAY_NUM#:}"
+LOCK_FILE="/tmp/.X${DISPLAY_NUM_BARE}-lock"
+SOCK_FILE="/tmp/.X11-unix/X${DISPLAY_NUM_BARE}"
+if [ -e "$LOCK_FILE" ]; then
+  lock_pid="$(cat "$LOCK_FILE" 2>/dev/null | tr -d '[:space:]')"
+  if [ -z "$lock_pid" ] || ! kill -0 "$lock_pid" 2>/dev/null; then
+    log "removing stale X lock for display $DISPLAY_NUM (pid $lock_pid not running)"
+    rm -f "$LOCK_FILE" "$SOCK_FILE"
+  fi
+fi
+
 log "starting Xorg on $DISPLAY ($RESOLUTION, $GPU_BUSID)"
 Xorg "$DISPLAY" -config /etc/X11/xorg.conf -ac -nolisten tcp \
      -novtswitch -sharevts -logfile /tmp/xorg.log vt1 &

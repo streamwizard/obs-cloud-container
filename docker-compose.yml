@@ -9,6 +9,11 @@ services:
     shm_size: "2gb"
     cap_add:
       - SYS_ADMIN
+      - NET_ADMIN
+      - SYS_PTRACE
+    security_opt:
+      - apparmor:unconfined
+      - seccomp:unconfined
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: all
