@@ -93,6 +93,41 @@ if [ -d "$GOLDEN_CFG" ]; then
   log "restored golden OBS config (StreamWizard profile reset to shipped state)"
 fi
 
+# One-time rename of OBS's auto-created default scene collection from
+# "Untitled" to "StreamWizard". We don't hand-author a scene collection
+# JSON ourselves (too easy to get the format subtly wrong and corrupt/crash
+# OBS) - instead we let OBS create Untitled.json itself on first boot using
+# its own writer, then on a later boot just rename the file and patch the
+# one "name" field we know the shape of. If the sed pattern doesn't match
+# for any reason, this is a no-op and OBS keeps using Untitled - never a
+# crash, just a cosmetic miss.
+SCENES_DIR="$APP_HOME/.config/obs-studio/basic/scenes"
+USER_INI="$APP_HOME/.config/obs-studio/user.ini"
+if [ -f "$SCENES_DIR/Untitled.json" ] && [ ! -f "$SCENES_DIR/StreamWizard.json" ]; then
+  if sed 's/"name": *"Untitled"/"name": "StreamWizard"/' "$SCENES_DIR/Untitled.json" \
+      > "$SCENES_DIR/StreamWizard.json.tmp"; then
+    mv "$SCENES_DIR/StreamWizard.json.tmp" "$SCENES_DIR/StreamWizard.json"
+    rm -f "$SCENES_DIR/Untitled.json"
+    chown app:app "$SCENES_DIR/StreamWizard.json"
+    if [ -f "$USER_INI" ]; then
+      sed -i \
+        -e 's/^SceneCollection=.*/SceneCollection=StreamWizard/' \
+        -e 's/^SceneCollectionFile=.*/SceneCollectionFile=StreamWizard/' \
+        "$USER_INI"
+      # Insert right after [Basic] rather than appending at EOF: user.ini
+      # has other sections below [Basic] (e.g. [BasicWindow]), and INI
+      # section membership is positional, so an EOF append would land
+      # under whatever section happens to be last instead of [Basic].
+      if ! grep -q '^SceneCollection=' "$USER_INI"; then
+        sed -i '/^\[Basic\]/a SceneCollection=StreamWizard\nSceneCollectionFile=StreamWizard' "$USER_INI"
+      fi
+    fi
+    log "renamed default scene collection Untitled -> StreamWizard"
+  else
+    rm -f "$SCENES_DIR/StreamWizard.json.tmp"
+  fi
+fi
+
 rm -f "$APP_HOME/.config/obs-studio/plugin_config/obs-browser/SingletonLock" \
       "$APP_HOME/.config/obs-studio/plugin_config/obs-browser/SingletonSocket" \
       "$APP_HOME/.config/obs-studio/plugin_config/obs-browser/SingletonCookie"
@@ -237,6 +272,16 @@ BWRAP_ARGS+=(
 # across restarts is instead handled entirely by the golden-config rsync
 # restore above, which resets these files on
 # every boot without needing them to be read-only *during* a session.
+
+# bwrap's own synthetic root (anything not explicitly bound above, e.g. /)
+# is writable by default, which let OBS's file dialogs create new folders
+# directly under "/" - harmless on disk (it's an in-memory mount, gone on
+# restart) but a real lockdown/UX gap (browsing "/" should not look
+# writable). --remount-ro applies to a mount point already bound above;
+# it must come after all the real --bind/--dev-bind entries, and does not
+# recurse into the writable mounts layered on top of it
+# (.config/obs-studio, .cache, media, $XDG), which stay read-write.
+BWRAP_ARGS+=(--remount-ro /)
 
 log "launching OBS (idle, no auto-stream), jailed via bwrap"
 rm -rf "$APP_HOME/.config/obs-studio/.sentinel" 2>/dev/null || true

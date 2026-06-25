@@ -36,6 +36,7 @@
 #include <QAction>
 #include <QPushButton>
 #include <QMenu>
+#include <QString>
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE("appliance-lockdown", "en-US")
@@ -56,6 +57,26 @@ const char *const kButtonNames[] = {
 	nullptr,
 };
 
+// Top-level menu-bar menus to hide entirely, including their entry in the
+// menu bar itself (not just the items inside). objectName()s are
+// best-effort guesses following the same "menuXxx" convention as
+// "menuTools" (already confirmed working in testing), not verified
+// against the OBS 32.1.2 source.
+const char *const kMenusToHide[] = {
+	"menuFile",
+	"menuProfile",
+	nullptr,
+};
+
+// Help menu entries whose text contains any of these (case-insensitive)
+// are kept; everything else in Help is hidden. We only want to leave a
+// way to get at log files for support/debugging - "Help Portal", "Visit
+// Website", "Discord", "Check for Updates", "About", etc. all go.
+const char *const kHelpKeepText[] = {
+	"log",
+	nullptr,
+};
+
 void RemoveByObjectName(QMainWindow *win, const char *const *names)
 {
 	for (int i = 0; names[i]; ++i) {
@@ -70,19 +91,57 @@ void RemoveByObjectName(QMainWindow *win, const char *const *names)
 	}
 }
 
-// Hides every entry in the Tools menu. The appliance has no use for any of
-// OBS's bundled Tools (Auto-Configuration Wizard, Output Timer, Auto Replay
-// Buffer Timer, etc.) - if a specific tool ever needs to stay reachable,
-// match on action->text() here instead of hiding all of them. setVisible
-// rather than deleteLater for the same dangling-pointer reason as above.
-void StripToolsMenu(QMainWindow *win)
+// Hides every entry inside a menu (the menu itself stays in the menu bar,
+// just empty/inert). Used for Tools, where we don't want any of OBS's
+// bundled tools reachable. setVisible/setEnabled rather than deleteLater
+// for the same dangling-pointer reason as above.
+void HideAllMenuEntries(QMainWindow *win, const char *menuObjectName)
 {
-	QMenu *toolsMenu = win->findChild<QMenu *>("menuTools");
-	if (!toolsMenu)
+	QMenu *menu = win->findChild<QMenu *>(menuObjectName);
+	if (!menu)
 		return;
-	for (QAction *action : toolsMenu->actions()) {
+	for (QAction *action : menu->actions()) {
 		action->setEnabled(false);
 		action->setVisible(false);
+	}
+}
+
+// Hides a menu's own entry in the menu bar (menuAction()), so the whole
+// menu disappears rather than just emptying its contents. Used for
+// File/Profile, which this appliance has no legitimate use for at all.
+void HideMenuEntirely(QMainWindow *win, const char *menuObjectName)
+{
+	QMenu *menu = win->findChild<QMenu *>(menuObjectName);
+	if (!menu)
+		return;
+	if (QAction *menuAction = menu->menuAction()) {
+		menuAction->setEnabled(false);
+		menuAction->setVisible(false);
+	}
+}
+
+// Hides every entry in a menu except ones whose text contains one of
+// keepSubstrings (case-insensitive). Used for Help, to leave only the
+// log-files entry reachable.
+void TrimMenuKeepingText(QMainWindow *win, const char *menuObjectName,
+			  const char *const *keepSubstrings)
+{
+	QMenu *menu = win->findChild<QMenu *>(menuObjectName);
+	if (!menu)
+		return;
+	for (QAction *action : menu->actions()) {
+		bool keep = false;
+		for (int i = 0; keepSubstrings[i]; ++i) {
+			if (action->text().contains(QString::fromLatin1(keepSubstrings[i]),
+						     Qt::CaseInsensitive)) {
+				keep = true;
+				break;
+			}
+		}
+		if (!keep) {
+			action->setEnabled(false);
+			action->setVisible(false);
+		}
 	}
 }
 
@@ -117,7 +176,10 @@ void OnFrontendEvent(enum obs_frontend_event event, void *)
 			break;
 		RemoveByObjectName(win, kActionNames);
 		RemoveByObjectName(win, kButtonNames);
-		StripToolsMenu(win);
+		HideAllMenuEntries(win, "menuTools");
+		for (int i = 0; kMenusToHide[i]; ++i)
+			HideMenuEntirely(win, kMenusToHide[i]);
+		TrimMenuKeepingText(win, "menuHelp", kHelpKeepText);
 		DisableAllHotkeys();
 		break;
 	}
