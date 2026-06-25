@@ -1,7 +1,7 @@
 services:
   obs-kiosk:
     build: .
-    image: obs-kiosk:latest
+    image: .
     container_name: obs-kiosk-1
     init: true
     restart: unless-stopped
@@ -14,15 +14,26 @@ services:
     security_opt:
       - apparmor:unconfined
       - seccomp:unconfined
+    # Do NOT add `no-new-privileges`: it makes the kernel ignore
+    # /usr/bin/bwrap's setuid bit on execve(), which silently breaks the
+    # entire OBS jail (see Dockerfile comment on the bwrap setuid bit).
+    # cap_drop: ALL was tried here but conflicts with the NET_ADMIN/
+    # SYS_PTRACE/unconfined apparmor+seccomp combination above, which is
+    # needed for the bwrap sandbox - revisit narrowing this once it can be
+    # tested against a running container.
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: all
       RESOLUTION: "1920x1080"
       GPU_BUSID: "PCI:0:16:0"
+      OBS_WEBSOCKET_PASSWORD: "${OBS_WEBSOCKET_PASSWORD:-}"
     ports:
       - "6080:6080"
       - "5900:5900"
       - "4455:4455"
     volumes:
-      - /home/jochemwhite/.config/obs-studio:/home/app/.config/obs-studio
+      - obs-config:/home/app/.config/obs-studio
     stop_grace_period: 10s
+
+volumes:
+  obs-config:

@@ -1,3 +1,25 @@
+# Builds the appliance-lockdown OBS frontend plugin (plugin/) against the
+# same PPA's libobs-dev/obs-frontend-api headers, so OBS itself stays an
+# unmodified binary install below - only this small .so is compiled.
+# Package names here (libobs-dev, the obs-frontend-api dev package, Qt6
+# dev package) are best-effort and should be confirmed against what the
+# obsproject PPA actually ships before trusting this stage to succeed.
+FROM ubuntu:24.04 AS plugin-builder
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        ca-certificates software-properties-common gpg-agent \
+ && add-apt-repository -y ppa:obsproject/obs-studio \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+        build-essential cmake ninja-build \
+        libobs-dev \
+        qt6-base-dev \
+ && rm -rf /var/lib/apt/lists/*
+COPY plugin /src/plugin
+RUN cmake -S /src/plugin -B /src/plugin/build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+ && cmake --build /src/plugin/build
+
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -22,6 +44,7 @@ RUN apt-get update \
         fonts-dejavu-core \
         libgl1 \
         bubblewrap \
+        rsync \
         obs-studio \
  && apt-get purge -y software-properties-common gpg-agent \
  && apt-get autoremove -y \
@@ -72,8 +95,14 @@ COPY --chown=app:app rc.xml /home/app/.config/openbox/rc.xml
 RUN chown -R app:app /home/app
 
 COPY xorg.conf.template /etc/X11/xorg.conf.template
+COPY golden-config/obs-studio /opt/obs-golden-config/obs-studio
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+
+COPY --from=plugin-builder /src/plugin/build/appliance-lockdown.so \
+     /usr/lib/x86_64-linux-gnu/obs-plugins/appliance-lockdown.so
+RUN chown root:root /usr/lib/x86_64-linux-gnu/obs-plugins/appliance-lockdown.so \
+ && chmod 644 /usr/lib/x86_64-linux-gnu/obs-plugins/appliance-lockdown.so
 
 EXPOSE 6080 5900 4455
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
