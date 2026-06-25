@@ -19,6 +19,7 @@ log() { echo "[entrypoint] $*"; }
 as_app() {
   runuser -u app -- env \
     HOME="$APP_HOME" \
+    PATH="/usr/bin:/bin" \
     DISPLAY="$DISPLAY" \
     XDG_RUNTIME_DIR="$XDG" \
     XDG_CACHE_HOME="$APP_HOME/.cache" \
@@ -66,6 +67,23 @@ chown -R app:app "$XDG" "$APP_HOME/.cache"
 chown app:app "$APP_HOME/.config" "$APP_HOME/.config/obs-studio" 2>/dev/null || true
 chmod 700 "$XDG"
 
+# Reset OBS's global.ini/profile to the shipped golden state on every boot,
+# so settings changes made in a prior session (or by a user poking the
+# config volume directly) never persist. plugin_config (websocket
+# password/auth) and basic/scenes are excluded: the golden config ships no
+# scene collection of its own, so whatever OBS creates on first boot is left
+# alone here and instead frozen read-only by the bwrap binds below once it
+# exists.
+GOLDEN_CFG=/opt/obs-golden-config/obs-studio
+if [ -d "$GOLDEN_CFG" ]; then
+  rsync -a --delete \
+    --exclude 'plugin_config/' --exclude 'logs/' --exclude 'crashes/' \
+    --exclude 'basic/scenes/' \
+    "$GOLDEN_CFG/" "$APP_HOME/.config/obs-studio/"
+  chown -R app:app "$APP_HOME/.config/obs-studio"
+  log "restored golden OBS config (profile/global.ini reset to shipped state)"
+fi
+
 rm -f "$APP_HOME/.config/obs-studio/plugin_config/obs-browser/SingletonLock" \
       "$APP_HOME/.config/obs-studio/plugin_config/obs-browser/SingletonSocket" \
       "$APP_HOME/.config/obs-studio/plugin_config/obs-browser/SingletonCookie"
@@ -73,18 +91,26 @@ rm -f "$APP_HOME/.config/obs-studio/plugin_config/obs-browser/SingletonLock" \
 WS_CFG="$APP_HOME/.config/obs-studio/plugin_config/obs-websocket/config.json"
 if [ ! -f "$WS_CFG" ]; then
   mkdir -p "$(dirname "$WS_CFG")"
+  if [ -z "${OBS_WEBSOCKET_PASSWORD:-}" ]; then
+    OBS_WEBSOCKET_PASSWORD="$(head -c 24 /dev/urandom | base64)"
+    PW_FILE="$APP_HOME/.config/obs-studio/.websocket_password"
+    printf '%s\n' "$OBS_WEBSOCKET_PASSWORD" > "$PW_FILE"
+    chmod 600 "$PW_FILE"
+    chown app:app "$PW_FILE"
+    log "no OBS_WEBSOCKET_PASSWORD set; generated a random password and saved it to $PW_FILE (not logged)"
+  fi
   cat > "$WS_CFG" <<EOF
 {
     "alerts_enabled": false,
-    "auth_required": false,
+    "auth_required": true,
     "first_load": false,
     "server_enabled": true,
-    "server_password": "",
+    "server_password": "${OBS_WEBSOCKET_PASSWORD}",
     "server_port": ${WS_PORT}
 }
 EOF
   chown -R app:app "$APP_HOME/.config/obs-studio/plugin_config"
-  log "seeded obs-websocket config (enabled, no auth, port ${WS_PORT})"
+  log "seeded obs-websocket config (enabled, auth required, port ${WS_PORT})"
 fi
 
 sed -e "s/__WIDTH__/$WIDTH/" -e "s/__HEIGHT__/$HEIGHT/" \
@@ -136,17 +162,26 @@ chown app:app "$APP_HOME/media"
 
 # Jail OBS in its own mount namespace so file pickers (Add Source, Open,
 # Import, ...) can only see its config/cache and the media folder, not the
-# rest of the image. Everything else stays read-only or absent. /dev and
-# /etc are bound in whole (no secrets live there in this image) so GPU
-# devices, fonts, certs and NSS lookups keep working.
+# rest of the image. Everything else stays read-only or absent. /etc is
+# bound in whole (no secrets live there in this image) so fonts, certs and
+# NSS lookups keep working; /dev is a synthetic minimal tree, see below.
 BWRAP_ARGS=(
   --unshare-pid
   --die-with-parent
   --proc /proc
-  --dev-bind /dev /dev
+  --dev /dev
   --ro-bind /usr /usr
   --ro-bind /etc /etc
 )
+# `--dev /dev` gives the jail its own minimal synthetic /dev (null, zero,
+# full, random, urandom, tty, pts, ...). On top of that we explicitly
+# allowlist only the GPU/NVENC device nodes OBS actually needs, instead of
+# binding the whole host /dev tree. /dev/video* (v4l2loopback, used for
+# OBS's virtual camera output) and /dev/snd (unused; audio goes over the
+# pulseaudio unix socket) are deliberately left out of the jail's view.
+for dev in /dev/dri/card* /dev/dri/renderD* /dev/nvidia*; do
+  [ -e "$dev" ] && BWRAP_ARGS+=(--dev-bind "$dev" "$dev")
+done
 [ -d /sys ] && BWRAP_ARGS+=(--ro-bind /sys /sys)
 for d in bin sbin lib lib64; do
   if [ -L "/$d" ]; then
@@ -164,6 +199,25 @@ BWRAP_ARGS+=(
   --bind "$APP_HOME/media" "$APP_HOME/media"
   --chdir "$APP_HOME"
 )
+
+# Settings lockdown: layer read-only binds over the specific config
+# sub-paths users shouldn't be able to edit, on top of the writable
+# .config/obs-studio bind above. bwrap applies binds in argument order, so
+# these later, more specific binds take precedence over the parent one;
+# logs/, crashes/, and the rest of plugin_config/ stay writable since OBS
+# needs to touch them at runtime.
+CFG="$APP_HOME/.config/obs-studio"
+[ -f "$CFG/global.ini" ] && BWRAP_ARGS+=(--ro-bind "$CFG/global.ini" "$CFG/global.ini")
+# Only basic.ini (encoder/output/recording-path settings) is frozen per
+# profile - service.json (stream server/key) is deliberately left writable
+# so the stream destination can still be configured at runtime (e.g. via
+# obs-websocket's SetStreamServiceSettings), which is the one thing this
+# appliance is meant to let users/operators change.
+for ini in "$CFG"/basic/profiles/*/basic.ini; do
+  [ -f "$ini" ] && BWRAP_ARGS+=(--ro-bind "$ini" "$ini")
+done
+[ -d "$CFG/basic/scenes" ] && BWRAP_ARGS+=(--ro-bind "$CFG/basic/scenes" "$CFG/basic/scenes")
+[ -f "$WS_CFG" ] && BWRAP_ARGS+=(--ro-bind "$WS_CFG" "$WS_CFG")
 
 log "launching OBS (idle, no auto-stream), jailed via bwrap"
 rm -rf "$APP_HOME/.config/obs-studio/.sentinel" 2>/dev/null || true

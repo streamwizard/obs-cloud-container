@@ -1,23 +1,39 @@
 services:
   obs-kiosk:
     build: .
-    image: obs-kiosk:latest
+    image: .
     container_name: obs-kiosk-1
     init: true
     restart: unless-stopped
     runtime: nvidia
     shm_size: "2gb"
+    # SYS_ADMIN is required for bwrap (entrypoint.sh) to create its own
+    # mount/PID namespace; everything else Docker grants by default is
+    # dropped. Do NOT add `no-new-privileges` here: it makes the kernel
+    # ignore /usr/bin/bwrap's setuid bit on execve(), which silently breaks
+    # the entire OBS jail (see Dockerfile comment on the bwrap setuid bit).
+    cap_drop:
+      - ALL
     cap_add:
       - SYS_ADMIN
+    # TODO: read_only: true + tmpfs mounts for /tmp,/run,/run/lock would
+    # further shrink the writable surface, but needs an empirical pass
+    # against a running container first to enumerate every path Xorg /
+    # pulseaudio / x11vnc / websockify / OBS write outside /home/app and
+    # /tmp/xdg-app - not safe to ship blind, so deferred until that's tested.
     environment:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: all
       RESOLUTION: "1920x1080"
       GPU_BUSID: "PCI:0:16:0"
+      OBS_WEBSOCKET_PASSWORD: "${OBS_WEBSOCKET_PASSWORD:-}"
     ports:
       - "6080:6080"
       - "5900:5900"
       - "4455:4455"
     volumes:
-      - /home/jochemwhite/.config/obs-studio:/home/app/.config/obs-studio
+      - obs-config:/home/app/.config/obs-studio
     stop_grace_period: 10s
+
+volumes:
+  obs-config:
