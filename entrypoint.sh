@@ -67,21 +67,26 @@ chown -R app:app "$XDG" "$APP_HOME/.cache"
 chown app:app "$APP_HOME/.config" "$APP_HOME/.config/obs-studio" 2>/dev/null || true
 chmod 700 "$XDG"
 
-# Reset OBS's global.ini/profile to the shipped golden state on every boot,
-# so settings changes made in a prior session (or by a user poking the
-# config volume directly) never persist. plugin_config (websocket
-# password/auth) and basic/scenes are excluded: the golden config ships no
-# scene collection of its own, so whatever OBS creates on first boot is left
-# alone here and instead frozen read-only by the bwrap binds below once it
-# exists.
+# Reset the StreamWizard profile's basic.ini (recording-path lockdown,
+# encoder defaults) to the shipped golden state on every boot. global.ini
+# is deliberately NOT force-reset here: OBS rewrites it itself to track
+# which scene collection is actually active, and overwriting that every
+# boot caused a reset loop (OBS could never find the scene collection
+# global.ini pointed at, so it kept recreating a fresh one - scenes never
+# persisted across restarts). global.ini is only seeded once, like the
+# websocket config below. plugin_config/logs/crashes/basic/scenes are
+# left alone for the same reason - OBS, not us, owns their contents.
 GOLDEN_CFG=/opt/obs-golden-config/obs-studio
 if [ -d "$GOLDEN_CFG" ]; then
   rsync -a --delete \
     --exclude 'plugin_config/' --exclude 'logs/' --exclude 'crashes/' \
-    --exclude 'basic/scenes/' \
+    --exclude 'basic/scenes/' --exclude 'global.ini' \
     "$GOLDEN_CFG/" "$APP_HOME/.config/obs-studio/"
+  if [ ! -f "$APP_HOME/.config/obs-studio/global.ini" ] && [ -f "$GOLDEN_CFG/global.ini" ]; then
+    cp "$GOLDEN_CFG/global.ini" "$APP_HOME/.config/obs-studio/global.ini"
+  fi
   chown -R app:app "$APP_HOME/.config/obs-studio"
-  log "restored golden OBS config (profile/global.ini reset to shipped state)"
+  log "restored golden OBS config (StreamWizard profile reset to shipped state)"
 fi
 
 rm -f "$APP_HOME/.config/obs-studio/plugin_config/obs-browser/SingletonLock" \
@@ -214,24 +219,17 @@ BWRAP_ARGS+=(
   --chdir "$APP_HOME"
 )
 
-# Settings lockdown: layer read-only binds over the specific config
-# sub-paths users shouldn't be able to edit, on top of the writable
-# .config/obs-studio bind above. bwrap applies binds in argument order, so
-# these later, more specific binds take precedence over the parent one;
-# logs/, crashes/, and the rest of plugin_config/ stay writable since OBS
-# needs to touch them at runtime.
-CFG="$APP_HOME/.config/obs-studio"
-[ -f "$CFG/global.ini" ] && BWRAP_ARGS+=(--ro-bind "$CFG/global.ini" "$CFG/global.ini")
-# Only basic.ini (encoder/output/recording-path settings) is frozen per
-# profile - service.json (stream server/key) is deliberately left writable
-# so the stream destination can still be configured at runtime (e.g. via
-# obs-websocket's SetStreamServiceSettings), which is the one thing this
-# appliance is meant to let users/operators change.
-for ini in "$CFG"/basic/profiles/*/basic.ini; do
-  [ -f "$ini" ] && BWRAP_ARGS+=(--ro-bind "$ini" "$ini")
-done
-[ -d "$CFG/basic/scenes" ] && BWRAP_ARGS+=(--ro-bind "$CFG/basic/scenes" "$CFG/basic/scenes")
-[ -f "$WS_CFG" ] && BWRAP_ARGS+=(--ro-bind "$WS_CFG" "$WS_CFG")
+# Settings lockdown was tried here as read-only bwrap binds over
+# global.ini/basic.ini/the websocket config, layered on top of the
+# writable .config/obs-studio bind above. Reverted: OBS doesn't just read
+# these files, it re-saves them at various points (e.g. switching to a
+# profile re-saves that profile's basic.ini; obs-websocket periodically
+# re-saves its own config.json) - with the file read-only, that save
+# fails, and for basic.ini specifically that crashed the whole obs process
+# (observed: switching to the StreamWizard profile killed the container).
+# Settings immutability across restarts is instead handled entirely by
+# the golden-config rsync restore above, which resets these files on
+# every boot without needing them to be read-only *during* a session.
 
 log "launching OBS (idle, no auto-stream), jailed via bwrap"
 rm -rf "$APP_HOME/.config/obs-studio/.sentinel" 2>/dev/null || true
