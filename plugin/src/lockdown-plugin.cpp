@@ -36,6 +36,7 @@
 #include <QAction>
 #include <QPushButton>
 #include <QMenu>
+#include <QMenuBar>
 #include <QString>
 
 OBS_DECLARE_MODULE()
@@ -76,6 +77,39 @@ const char *const kHelpKeepText[] = {
 	"log",
 	nullptr,
 };
+
+// Diagnostic only: logs the real objectName()/text() of every top-level
+// menu, every action inside each menu, and every QPushButton in the main
+// window, to the OBS log. Every objectName guessed elsewhere in this file
+// has been wrong at least once this session - this replaces guessing with
+// ground truth from an actual running instance's log.
+void DumpUI(QMainWindow *win)
+{
+	blog(LOG_INFO, "[appliance-lockdown] ---- UI dump start ----");
+	if (QMenuBar *bar = win->menuBar()) {
+		for (QAction *topAction : bar->actions()) {
+			QMenu *menu = topAction->menu();
+			blog(LOG_INFO,
+			     "[appliance-lockdown] top-menu objectName=\"%s\" text=\"%s\"",
+			     qPrintable(menu ? menu->objectName() : topAction->objectName()),
+			     qPrintable(topAction->text()));
+			if (!menu)
+				continue;
+			for (QAction *action : menu->actions()) {
+				if (action->isSeparator())
+					continue;
+				blog(LOG_INFO,
+				     "[appliance-lockdown]   item objectName=\"%s\" text=\"%s\"",
+				     qPrintable(action->objectName()), qPrintable(action->text()));
+			}
+		}
+	}
+	for (QPushButton *btn : win->findChildren<QPushButton *>()) {
+		blog(LOG_INFO, "[appliance-lockdown] button objectName=\"%s\" text=\"%s\"",
+		     qPrintable(btn->objectName()), qPrintable(btn->text()));
+	}
+	blog(LOG_INFO, "[appliance-lockdown] ---- UI dump end ----");
+}
 
 void RemoveByObjectName(QMainWindow *win, const char *const *names)
 {
@@ -174,6 +208,7 @@ void OnFrontendEvent(enum obs_frontend_event event, void *)
 		auto *win = (QMainWindow *)obs_frontend_get_main_window();
 		if (!win)
 			break;
+		DumpUI(win);
 		RemoveByObjectName(win, kActionNames);
 		RemoveByObjectName(win, kButtonNames);
 		HideAllMenuEntries(win, "menuTools");

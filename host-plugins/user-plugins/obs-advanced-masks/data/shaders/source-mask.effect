@@ -1,0 +1,250 @@
+#include "common.effect"
+
+uniform float4x4 ViewProj;
+
+uniform texture2d image;
+uniform texture2d source_image;
+uniform float2 source_image_size;
+uniform float2 mask_image_size;
+uniform float2 mask_offset;
+uniform float2 mask_position;
+uniform float2 positional_offset;
+uniform float  mask_rotation;
+
+uniform float4 channel_multipliers;
+uniform float multiplier;
+uniform bool invert;
+uniform float threshold_value;
+uniform float range_min;
+uniform float range_max;
+
+uniform float min_brightness;
+uniform float max_brightness;
+uniform float min_contrast;
+uniform float max_contrast;
+uniform float min_saturation;
+uniform float max_saturation;
+uniform float min_hue_shift;
+uniform float max_hue_shift;
+
+sampler_state textureSampler{
+    Filter = Linear;
+    AddressU = Clamp;
+    AddressV = Clamp;
+    MinLOD = 0;
+    MaxLOD = 0;
+};
+
+// <ADDR_U> and <ADDR_V> are template
+// parameters that are replaced by filter code.
+sampler_state tiledSampler{
+    Filter = Linear;
+    AddressU = <ADDR_U>;
+    AddressV = <ADDR_V>;
+    MinLOD = 0;
+    MaxLOD = 0;
+    BorderColor = 00000000;
+};
+
+struct VertData
+{
+	float4 pos : POSITION;
+	float2 uv : TEXCOORD0;
+};
+
+
+VertData mainTransform(VertData v_in)
+{
+	v_in.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	return v_in;
+}
+
+float4 alphaImage(VertData v_in) : TARGET
+{
+#ifdef MANUAL_SCALING
+	float2 coord = v_in.uv * source_image_size;
+	float2 mask_uv = (coord-mask_position);
+	mask_uv = float2(mask_uv.x * cos(mask_rotation) - mask_uv.y * sin(mask_rotation), mask_uv.x * sin(mask_rotation) + mask_uv.y * cos(mask_rotation));
+	mask_uv += positional_offset * mask_image_size;
+	mask_uv -= mask_offset;
+	mask_uv = mask_uv / mask_image_size;
+	float4 mask = source_image.Sample(tiledSampler, mask_uv);
+#else
+	float4 mask = source_image.Sample(textureSampler, v_in.uv);
+#endif
+	float alpha = multiplier * (mask.r * channel_multipliers.r + mask.g * channel_multipliers.g + mask.b * channel_multipliers.b + mask.a * channel_multipliers.a);
+	float4 color = image.Sample(textureSampler, v_in.uv);
+	return float4(color.rgb, color.a * (invert ? 1.0 - alpha : alpha));
+}
+
+float4 adjustmentsImage(VertData v_in) : TARGET
+{
+#ifdef MANUAL_SCALING
+	float2 coord = v_in.uv * source_image_size;
+	float2 mask_uv = (coord-mask_position);
+	mask_uv = float2(mask_uv.x * cos(mask_rotation) - mask_uv.y * sin(mask_rotation), mask_uv.x * sin(mask_rotation) + mask_uv.y * cos(mask_rotation));
+	mask_uv += positional_offset * mask_image_size;
+	mask_uv -= mask_offset;
+	mask_uv = mask_uv / mask_image_size;
+	float4 mask = source_image.Sample(tiledSampler, mask_uv);
+#else
+	float4 mask = source_image.Sample(textureSampler, v_in.uv);
+#endif
+	float scale = multiplier * (mask.r * channel_multipliers.r + mask.g * channel_multipliers.g + mask.b * channel_multipliers.b + mask.a * channel_multipliers.a);
+	scale = invert ? 1.0 - scale : scale;
+	float4 color = image.Sample(textureSampler, v_in.uv);
+	color = adjustments(
+		color,
+		lerp(min_brightness, max_brightness, scale),
+		lerp(min_contrast, max_contrast, scale),
+		lerp(min_saturation, max_saturation, scale),
+		lerp(min_hue_shift, max_hue_shift, scale)
+	);
+	return color;
+}
+
+float4 alphaThresholdImage(VertData v_in) : TARGET
+{
+#ifdef MANUAL_SCALING
+	float2 coord = v_in.uv * source_image_size;
+	float2 mask_uv = (coord-mask_position);
+	mask_uv = float2(mask_uv.x * cos(mask_rotation) - mask_uv.y * sin(mask_rotation), mask_uv.x * sin(mask_rotation) + mask_uv.y * cos(mask_rotation));
+	mask_uv += positional_offset * mask_image_size;
+	mask_uv -= mask_offset;
+	mask_uv = mask_uv / mask_image_size;
+	float4 mask = source_image.Sample(tiledSampler, mask_uv);
+#else
+	float4 mask = source_image.Sample(textureSampler, v_in.uv);
+#endif
+	float alpha = multiplier * (mask.r * channel_multipliers.r + mask.g * channel_multipliers.g + mask.b * channel_multipliers.b + mask.a * channel_multipliers.a);
+	alpha = step(threshold_value, alpha);
+	float4 color = image.Sample(textureSampler, v_in.uv);
+	return float4(color.rgb, color.a * (invert ? 1.0 - alpha : alpha));
+}
+
+float4 adjustmentsThresholdImage(VertData v_in) : TARGET
+{
+#ifdef MANUAL_SCALING
+	float2 coord = v_in.uv * source_image_size;
+	float2 mask_uv = (coord-mask_position);
+	mask_uv = float2(mask_uv.x * cos(mask_rotation) - mask_uv.y * sin(mask_rotation), mask_uv.x * sin(mask_rotation) + mask_uv.y * cos(mask_rotation));
+	mask_uv += positional_offset * mask_image_size;
+	mask_uv -= mask_offset;
+	mask_uv = mask_uv / mask_image_size;
+	float4 mask = source_image.Sample(tiledSampler, mask_uv);
+#else
+	float4 mask = source_image.Sample(textureSampler, v_in.uv);
+#endif
+	float scale = multiplier * (mask.r * channel_multipliers.r + mask.g * channel_multipliers.g + mask.b * channel_multipliers.b + mask.a * channel_multipliers.a);
+	scale = step(threshold_value, scale);
+	scale = invert ? 1.0 - scale : scale;
+	float4 color = image.Sample(textureSampler, v_in.uv);
+	color = adjustments(
+		color,
+		lerp(min_brightness, max_brightness, scale),
+		lerp(min_contrast, max_contrast, scale),
+		lerp(min_saturation, max_saturation, scale),
+		lerp(min_hue_shift, max_hue_shift, scale)
+	);
+	return color;
+}
+
+float4 alphaRangeImage(VertData v_in) : TARGET
+{
+#ifdef MANUAL_SCALING
+	float2 coord = v_in.uv * source_image_size;
+	float2 mask_uv = (coord-mask_position);
+	mask_uv = float2(mask_uv.x * cos(mask_rotation) - mask_uv.y * sin(mask_rotation), mask_uv.x * sin(mask_rotation) + mask_uv.y * cos(mask_rotation));
+	mask_uv += positional_offset * mask_image_size;
+	mask_uv -= mask_offset;
+	mask_uv = mask_uv / mask_image_size;
+	float4 mask = source_image.Sample(tiledSampler, mask_uv);
+#else
+	float4 mask = source_image.Sample(textureSampler, v_in.uv);
+#endif
+	float alpha = multiplier * (mask.r * channel_multipliers.r + mask.g * channel_multipliers.g + mask.b * channel_multipliers.b + mask.a * channel_multipliers.a);
+	alpha = smoothstep(range_min, range_max, alpha);
+	float4 color = image.Sample(textureSampler, v_in.uv);
+	return float4(color.rgb, color.a * (invert ? 1.0 - alpha : alpha));
+}
+
+float4 adjustmentsRangeImage(VertData v_in) : TARGET
+{
+#ifdef MANUAL_SCALING
+	float2 coord = v_in.uv * source_image_size;
+	float2 mask_uv = (coord-mask_position);
+	mask_uv = float2(mask_uv.x * cos(mask_rotation) - mask_uv.y * sin(mask_rotation), mask_uv.x * sin(mask_rotation) + mask_uv.y * cos(mask_rotation));
+	mask_uv += positional_offset * mask_image_size;
+	mask_uv -= mask_offset;
+	mask_uv = mask_uv / mask_image_size;
+	float4 mask = source_image.Sample(tiledSampler, mask_uv);
+#else
+	float4 mask = source_image.Sample(textureSampler, v_in.uv);
+#endif
+	float scale = multiplier * (mask.r * channel_multipliers.r + mask.g * channel_multipliers.g + mask.b * channel_multipliers.b + mask.a * channel_multipliers.a);
+	scale = smoothstep(range_min, range_max, scale);
+	scale = invert ? 1.0 - scale : scale;
+	float4 color = image.Sample(textureSampler, v_in.uv);
+	color = adjustments(
+		color,
+		lerp(min_brightness, max_brightness, scale),
+		lerp(min_contrast, max_contrast, scale),
+		lerp(min_saturation, max_saturation, scale),
+		lerp(min_hue_shift, max_hue_shift, scale)
+	);
+	return color;
+}
+
+technique Alpha
+{
+	pass
+	{
+		vertex_shader = mainTransform(v_in);
+		pixel_shader = alphaImage(v_in);
+	}
+}
+
+technique Adjustments
+{
+	pass
+	{
+		vertex_shader = mainTransform(v_in);
+		pixel_shader = adjustmentsImage(v_in);
+	}
+}
+
+technique AlphaThreshold
+{
+	pass
+	{
+		vertex_shader = mainTransform(v_in);
+		pixel_shader = alphaThresholdImage(v_in);
+	}
+}
+
+technique AlphaRange
+{
+	pass
+	{
+		vertex_shader = mainTransform(v_in);
+		pixel_shader = alphaRangeImage(v_in);
+	}
+}
+
+technique AdjustmentsThreshold
+{
+	pass
+	{
+		vertex_shader = mainTransform(v_in);
+		pixel_shader = adjustmentsThresholdImage(v_in);
+	}
+}
+
+technique AdjustmentsRange
+{
+	pass
+	{
+		vertex_shader = mainTransform(v_in);
+		pixel_shader = adjustmentsRangeImage(v_in);
+	}
+}

@@ -33,6 +33,11 @@ services:
       - "4455:4455"
     volumes:
       - obs-config:/home/app/.config/obs-studio
+      # Drop extra OBS plugins here without rebuilding the image: .so
+      # binaries under obs-plugins/ and any companion locale/data files
+      # under data/ get copied into the real OBS plugin paths by
+      # entrypoint.sh before the bwrap jail starts. See host-plugins/README.
+      - ./host-plugins:/opt/extra-plugins:ro
     stop_grace_period: 10s
 
 volumes:

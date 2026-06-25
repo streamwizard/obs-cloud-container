@@ -50,31 +50,12 @@ RUN apt-get update \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
 
-ARG AITUM_MULTISTREAM_VERSION="1.0.8"
-ARG AITUM_MULTISTREAM_SHA256="08f0e869be80a1c44ca265a3fadfac033c3f4c8d4c7fb1f8d28838b9554d9c6d"
-RUN apt-get update \
- && apt-get install -y --no-install-recommends curl \
- && curl -fsSL -o /tmp/aitum-multistream.deb \
-    "https://github.com/Aitum/obs-aitum-multistream/releases/download/${AITUM_MULTISTREAM_VERSION}/aitum-multistream-linux-gnu.deb" \
- && echo "${AITUM_MULTISTREAM_SHA256}  /tmp/aitum-multistream.deb" | sha256sum -c - \
- && dpkg -i /tmp/aitum-multistream.deb || apt-get install -f -y --no-install-recommends \
- && rm -f /tmp/aitum-multistream.deb \
- && apt-get purge -y curl \
- && apt-get autoremove -y \
- && rm -rf /var/lib/apt/lists/*
-
-ARG AITUM_VERTICAL_VERSION="1.6.4"
-ARG AITUM_VERTICAL_SHA256="c982d6acf248f83e7e97d354055e245fa6957b66715f4249b849d913042aaf37"
-RUN apt-get update \
- && apt-get install -y --no-install-recommends curl \
- && curl -fsSL -o /tmp/aitum-vertical.deb \
-    "https://github.com/Aitum/obs-vertical-canvas/releases/download/${AITUM_VERTICAL_VERSION}/vertical-canvas-linux-gnu.deb" \
- && echo "${AITUM_VERTICAL_SHA256}  /tmp/aitum-vertical.deb" | sha256sum -c - \
- && dpkg -i /tmp/aitum-vertical.deb || apt-get install -f -y --no-install-recommends \
- && rm -f /tmp/aitum-vertical.deb \
- && apt-get purge -y curl \
- && apt-get autoremove -y \
- && rm -rf /var/lib/apt/lists/*
+# aitum-multistream and vertical-canvas used to be installed here at build
+# time. They're now supplied at runtime via host-plugins/ (mounted to
+# /opt/extra-plugins by docker-compose.yml, copied into place by
+# entrypoint.sh before the bwrap jail starts) like any other plugin, so
+# they can be swapped/updated without rebuilding the image. See
+# host-plugins/README.md.
 
 RUN userdel -r ubuntu 2>/dev/null || true; groupdel ubuntu 2>/dev/null || true; \
     groupadd -g 1000 app && \

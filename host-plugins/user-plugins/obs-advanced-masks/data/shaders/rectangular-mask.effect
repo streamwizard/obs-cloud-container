@@ -1,0 +1,155 @@
+#include "common.effect"
+
+uniform float4x4 ViewProj;
+
+uniform texture2d image;
+uniform float2 uv_size;
+
+uniform float2 mask_position;
+uniform float width;
+uniform float height;
+uniform float zoom;
+
+uniform float2 aspect_ratio;
+uniform float2 global_position;
+uniform float global_scale;
+uniform float max_corner_radius;
+uniform float4 corner_radius;
+uniform float feather_shift;
+uniform float feather_amount;
+uniform float sin_theta;
+uniform float cos_theta;
+uniform float invert;
+uniform float alpha_zero;
+
+uniform float min_brightness;
+uniform float max_brightness;
+uniform float min_contrast;
+uniform float max_contrast;
+uniform float min_saturation;
+uniform float max_saturation;
+uniform float min_hue_shift;
+uniform float max_hue_shift;
+
+uniform float aa_scale;
+
+sampler_state textureSampler{
+    Filter = Linear;
+    AddressU = Border;
+    AddressV = Border;
+    BorderColor = 0x00000000;
+};
+
+struct VertData
+{
+	float4 pos : POSITION;
+	float2 uv : TEXCOORD0;
+};
+
+/*
+ * Original Rounded Box SDF code by Inigo Quilez: https://iquilezles.org/articles/distfunctions2d/
+ * Converted to OBS HLSL by FiniteSingularity
+ */
+float SDF(float2 coord, float2 dims, float4 radii)
+{
+	radii.xy = coord.x > 0.0f ? radii.xy : radii.zw;
+	radii.x = coord.y > 0.0f ? radii.x : radii.y;
+	float2 dist = abs(coord) - dims + radii.x;
+	return min(max(dist.x, dist.y), 0.0f) + length(max(dist, float2(0.0f, 0.0f))) - radii.x;
+}
+
+VertData mainTransform(VertData v_in)
+{
+	v_in.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	return v_in;
+}
+
+float4 alphaImage(VertData v_in) : TARGET
+{
+	float zero = saturate(min(floor(width), floor(height)));
+	float2 coord = v_in.uv * uv_size;
+	float2 shift = global_position - mask_position;
+	float2 coord_p = coord - shift;
+	float2 dist = coord_p - mask_position;
+	float2 sample_dist = float2(dist.x * cos_theta - dist.y * sin_theta, dist.x * sin_theta + dist.y * cos_theta);
+	float d = SDF(sample_dist, float2(width, height), corner_radius);
+	d = feather_amount > 0.0f ? smoothstep(0.0f, feather_amount, -d + feather_amount) : saturate(-(d - 1.0f) * zero);
+	
+	float4 color = image.Sample(textureSampler, (mask_position + dist / zoom / global_scale) / uv_size);
+	return float4(color.rgb, (1.0f - invert) * color.a * d + invert * color.a * (1.0f - d));
+}
+
+float4 alphaFrameCheckImage(VertData v_in) : TARGET
+{
+	float zero = saturate(min(floor(width), floor(height)));
+	float2 coord = v_in.uv * uv_size;
+	float2 shift = global_position - mask_position;
+	float2 coord_p = coord - shift;
+	float2 dist = coord_p - mask_position;
+	float2 sample_dist = float2(dist.x * cos_theta - dist.y * sin_theta, dist.x * sin_theta + dist.y * cos_theta);
+	float d = SDF(sample_dist, float2(width, height), corner_radius);
+	float2 sample_uv = (mask_position + dist / zoom / global_scale) / uv_size;
+	float alpha_scale = sample_uv.x >= 0.0f && sample_uv.x <= 1.0f &&
+	sample_uv.y >= 0.0f && sample_uv.y <= 1.0f ? 1.0f : 0.0f;
+	d = feather_amount > 0.0f ? smoothstep(0.0f, feather_amount, -d + feather_amount) : saturate(-(d - 1.0) * zero);
+	d = (1.0f - invert) * d + invert * (1.0 - d);
+	d = (d + alpha_zero) / (1.0 + alpha_zero);
+	
+	float4 color = image.Sample(textureSampler, (mask_position + dist / zoom / global_scale) / uv_size);
+	return float4(color.rgb, color.a * d);
+}
+
+float4 adjustmentsImage(VertData v_in) : TARGET
+{
+	float zero = saturate(min(floor(width), floor(height)));
+	float2 coord = v_in.uv * uv_size;
+	float2 dist = coord - mask_position;
+	float2 sample_dist = float2(dist.x * cos_theta - dist.y * sin_theta, dist.x * sin_theta + dist.y * cos_theta);
+	float d = SDF(sample_dist, float2(width, height), corner_radius) + feather_shift;
+	d = feather_amount > 0.0f ? smoothstep(0.0f, feather_amount, -d) : saturate(-(d - 1.0f) * zero);
+	d = (1.0f - invert) * d + invert * (1.0 - d);
+
+	float4 color = image.Sample(textureSampler, v_in.uv);
+	float4 color_adj_min = adjustments(
+		color,
+		min_brightness,
+		min_contrast,
+		min_saturation,
+		min_hue_shift
+	);
+	float4 color_adj_max = adjustments(
+		color,
+		max_brightness,
+		max_contrast,
+		max_saturation,
+		max_hue_shift
+	);
+	return (color_adj_min * (1.0 - d) + color_adj_max *d );
+}
+
+technique Alpha
+{
+	pass
+	{
+		vertex_shader = mainTransform(v_in);
+		pixel_shader = alphaImage(v_in);
+	}
+}
+
+technique AlphaFrameCheck
+{
+	pass
+	{
+		vertex_shader = mainTransform(v_in);
+		pixel_shader = alphaFrameCheckImage(v_in);
+	}
+}
+
+technique Adjustments
+{
+	pass
+	{
+		vertex_shader = mainTransform(v_in);
+		pixel_shader = adjustmentsImage(v_in);
+	}
+}

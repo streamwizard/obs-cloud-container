@@ -93,39 +93,18 @@ if [ -d "$GOLDEN_CFG" ]; then
   log "restored golden OBS config (StreamWizard profile reset to shipped state)"
 fi
 
-# One-time rename of OBS's auto-created default scene collection from
-# "Untitled" to "StreamWizard". We don't hand-author a scene collection
-# JSON ourselves (too easy to get the format subtly wrong and corrupt/crash
-# OBS) - instead we let OBS create Untitled.json itself on first boot using
-# its own writer, then on a later boot just rename the file and patch the
-# one "name" field we know the shape of. If the sed pattern doesn't match
-# for any reason, this is a no-op and OBS keeps using Untitled - never a
-# crash, just a cosmetic miss.
+# One-time seed of the real StreamWizard scene collection (boilerplate
+# scenes/sources), exported from an actual OBS instance rather than
+# hand-authored - same "only seed once, never force-reset" treatment as
+# user.ini, so edits made while building it out further (more scenes,
+# sources, filters) persist across restarts instead of getting wiped.
 SCENES_DIR="$APP_HOME/.config/obs-studio/basic/scenes"
-USER_INI="$APP_HOME/.config/obs-studio/user.ini"
-if [ -f "$SCENES_DIR/Untitled.json" ] && [ ! -f "$SCENES_DIR/StreamWizard.json" ]; then
-  if sed 's/"name": *"Untitled"/"name": "StreamWizard"/' "$SCENES_DIR/Untitled.json" \
-      > "$SCENES_DIR/StreamWizard.json.tmp"; then
-    mv "$SCENES_DIR/StreamWizard.json.tmp" "$SCENES_DIR/StreamWizard.json"
-    rm -f "$SCENES_DIR/Untitled.json"
-    chown app:app "$SCENES_DIR/StreamWizard.json"
-    if [ -f "$USER_INI" ]; then
-      sed -i \
-        -e 's/^SceneCollection=.*/SceneCollection=StreamWizard/' \
-        -e 's/^SceneCollectionFile=.*/SceneCollectionFile=StreamWizard/' \
-        "$USER_INI"
-      # Insert right after [Basic] rather than appending at EOF: user.ini
-      # has other sections below [Basic] (e.g. [BasicWindow]), and INI
-      # section membership is positional, so an EOF append would land
-      # under whatever section happens to be last instead of [Basic].
-      if ! grep -q '^SceneCollection=' "$USER_INI"; then
-        sed -i '/^\[Basic\]/a SceneCollection=StreamWizard\nSceneCollectionFile=StreamWizard' "$USER_INI"
-      fi
-    fi
-    log "renamed default scene collection Untitled -> StreamWizard"
-  else
-    rm -f "$SCENES_DIR/StreamWizard.json.tmp"
-  fi
+GOLDEN_SCENE="$GOLDEN_CFG/basic/scenes/StreamWizard.json"
+if [ -f "$GOLDEN_SCENE" ] && [ ! -f "$SCENES_DIR/StreamWizard.json" ]; then
+  mkdir -p "$SCENES_DIR"
+  cp "$GOLDEN_SCENE" "$SCENES_DIR/StreamWizard.json"
+  chown app:app "$SCENES_DIR/StreamWizard.json"
+  log "seeded StreamWizard scene collection"
 fi
 
 rm -f "$APP_HOME/.config/obs-studio/plugin_config/obs-browser/SingletonLock" \
@@ -155,6 +134,45 @@ if [ ! -f "$WS_CFG" ]; then
 EOF
   chown -R app:app "$APP_HOME/.config/obs-studio/plugin_config"
   log "seeded obs-websocket config (enabled, auth required, port ${WS_PORT})"
+fi
+
+# Install any extra OBS plugins dropped into the host-plugins/ mount
+# (docker-compose.yml maps it to /opt/extra-plugins, read-only) without
+# needing an image rebuild. Real OBS plugins ship in one of two layouts
+# depending on the author/build, both confirmed by extracting actual
+# release packages rather than guessed:
+#   1. System-wide (.deb-style: Aitum, Move, Source Profiler, Source
+#      Clone): a bare .so for obs-plugins/, plus a <name>/ data dir for
+#      locale files. This MUST run as root, before the bwrap jail below,
+#      since bwrap --ro-bind's /usr at the state it's in when bwrap
+#      launches - anything copied in after that point would not be
+#      visible to OBS inside the jail.
+#   2. Per-user (manual-install-style: Advanced Masks, Composite Blur):
+#      a <name>/ folder containing bin/64bit/<name>.so and data/ (locale
+#      + shaders/etc). These install straight into
+#      ~/.config/obs-studio/plugins/, which is already a writable bwrap
+#      bind, so timing relative to the jail doesn't matter for these.
+EXTRA_PLUGINS_DIR=/opt/extra-plugins
+OBS_PLUGINS_DIR=/usr/lib/x86_64-linux-gnu/obs-plugins
+OBS_PLUGIN_DATA_DIR=/usr/share/obs/obs-plugins
+if [ -d "$EXTRA_PLUGINS_DIR/obs-plugins" ]; then
+  cp -a "$EXTRA_PLUGINS_DIR/obs-plugins/." "$OBS_PLUGINS_DIR/"
+  chmod -R a+rX "$OBS_PLUGINS_DIR"
+  log "installed extra plugin binaries from $EXTRA_PLUGINS_DIR/obs-plugins"
+fi
+if [ -d "$EXTRA_PLUGINS_DIR/data" ]; then
+  mkdir -p "$OBS_PLUGIN_DATA_DIR"
+  cp -a "$EXTRA_PLUGINS_DIR/data/." "$OBS_PLUGIN_DATA_DIR/"
+  chmod -R a+rX "$OBS_PLUGIN_DATA_DIR"
+  log "installed extra plugin data from $EXTRA_PLUGINS_DIR/data"
+fi
+if [ -d "$EXTRA_PLUGINS_DIR/user-plugins" ]; then
+  USER_PLUGINS_DST="$APP_HOME/.config/obs-studio/plugins"
+  mkdir -p "$USER_PLUGINS_DST"
+  cp -a "$EXTRA_PLUGINS_DIR/user-plugins/." "$USER_PLUGINS_DST/"
+  chown -R app:app "$USER_PLUGINS_DST"
+  chmod -R a+rX "$USER_PLUGINS_DST"
+  log "installed extra per-user plugins from $EXTRA_PLUGINS_DIR/user-plugins"
 fi
 
 sed -e "s/__WIDTH__/$WIDTH/" -e "s/__HEIGHT__/$HEIGHT/" \
@@ -281,7 +299,15 @@ BWRAP_ARGS+=(
 # it must come after all the real --bind/--dev-bind entries, and does not
 # recurse into the writable mounts layered on top of it
 # (.config/obs-studio, .cache, media, $XDG), which stay read-write.
-BWRAP_ARGS+=(--remount-ro /)
+#
+# /dev (from `--dev /dev` above) is its OWN separate mount, not a child of
+# root in the way that matters here, so remounting root read-only doesn't
+# touch it - confirmed in testing: folder creation was blocked at "/" but
+# still worked under "/dev". Remounting /dev read-only too is safe: the
+# read-only flag blocks creating/deleting entries in that mount, but does
+# not block read/write I/O on the device nodes already bound into it
+# (GPU/NVENC access goes through the device driver, not mount permissions).
+BWRAP_ARGS+=(--remount-ro /dev --remount-ro /)
 
 log "launching OBS (idle, no auto-stream), jailed via bwrap"
 rm -rf "$APP_HOME/.config/obs-studio/.sentinel" 2>/dev/null || true

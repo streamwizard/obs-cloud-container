@@ -1,0 +1,133 @@
+#include "common.effect"
+
+uniform float4x4 ViewProj;
+
+uniform texture2d image;
+uniform float2 uv_size;
+uniform float2 mask_position;
+uniform float2 global_position;
+uniform float global_scale;
+uniform float radius;
+uniform float zoom;
+uniform float feather_amount;
+uniform float alpha_zero;
+uniform float invert;
+
+uniform float min_brightness;
+uniform float max_brightness;
+uniform float min_contrast;
+uniform float max_contrast;
+uniform float min_saturation;
+uniform float max_saturation;
+uniform float min_hue_shift;
+uniform float max_hue_shift;
+
+sampler_state textureSampler{
+    Filter = Linear;
+    AddressU = Border;
+    AddressV = Border;
+    BorderColor = 0x00000000;
+};
+struct VertData
+{
+	float4 pos : POSITION;
+	float2 uv : TEXCOORD0;
+};
+
+float SDF(float2 coord, float radius)
+{
+	return length(coord) - radius;
+}
+
+VertData mainTransform(VertData v_in)
+{
+	v_in.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+	return v_in;
+}
+
+float4 alphaImage(VertData v_in) : TARGET
+{
+	float zero = saturate(floor(radius));
+	float2 coord = v_in.uv * uv_size;
+	float2 shift = global_position - mask_position;
+	float2 coord_p = coord - shift;
+	float2 dist = coord_p - mask_position; // coord - global_position + mask_position - mask_position
+	float d = SDF(dist, radius);
+	d = feather_amount > 0.0f ? smoothstep(0.0f, feather_amount, -d + feather_amount) : saturate(-(d - 1.0) * zero);
+	
+	float4 color = image.Sample(textureSampler, (mask_position + dist / zoom / global_scale) / uv_size);
+	return float4(color.rgb, (1.0f - invert) * color.a * d + invert * color.a * (1.0f - d));
+}
+
+float4 alphaFrameCheckImage(VertData v_in) : TARGET
+{
+	float zero = saturate(floor(radius));
+	float2 coord = v_in.uv * uv_size;
+	float2 shift = global_position - mask_position;
+	float2 coord_p = coord - shift;
+	float2 dist = coord_p - mask_position;
+	float d = SDF(dist, radius);
+	float2 sample_uv = (mask_position + dist / zoom / global_scale) / uv_size;
+	float alpha_scale = sample_uv.x >= 0.0f && sample_uv.x <= 1.0f &&
+	sample_uv.y >= 0.0f && sample_uv.y <= 1.0f ? 1.0f : 0.0f;
+	d = feather_amount > 0.0f ? smoothstep(0.0f, feather_amount, -d + feather_amount) : saturate(-(d - 1.0) * zero);
+	d = (1.0f - invert) * d + invert * (1.0 - d);
+	d = (d + alpha_zero) / (1.0 + alpha_zero);
+	
+	float4 color = image.Sample(textureSampler, (mask_position + dist / zoom / global_scale) / uv_size);
+	return float4(color.rgb, color.a * d);
+}
+
+float4 adjustmentsImage(VertData v_in) : TARGET
+{
+	float zero = saturate(floor(radius));
+	float2 coord = v_in.uv * uv_size;
+	float2 dist = coord - mask_position;
+	float d = SDF(dist, radius);
+	d = feather_amount > 0.0f ? smoothstep(0.0f, feather_amount, -d + feather_amount) : saturate(-(d - 1.0) * zero);
+	d = (1.0f - invert) * d + invert * (1.0 - d);
+	
+	float4 color = image.Sample(textureSampler, v_in.uv);
+	float4 color_adj_min = adjustments(
+		color,
+		min_brightness,
+		min_contrast,
+		min_saturation,
+		min_hue_shift
+	);
+	float4 color_adj_max = adjustments(
+		color,
+		max_brightness,
+		max_contrast,
+		max_saturation,
+		max_hue_shift
+	);
+	return (color_adj_min * (1.0 - d) + color_adj_max * d);
+}
+
+technique Alpha
+{
+	pass
+	{
+		vertex_shader = mainTransform(v_in);
+		pixel_shader = alphaImage(v_in);
+	}
+}
+
+technique AlphaFrameCheck
+{
+	pass
+	{
+		vertex_shader = mainTransform(v_in);
+		pixel_shader = alphaFrameCheckImage(v_in);
+	}
+}
+
+technique Adjustments
+{
+	pass
+	{
+		vertex_shader = mainTransform(v_in);
+		pixel_shader = adjustmentsImage(v_in);
+	}
+}
