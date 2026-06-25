@@ -68,22 +68,26 @@ chown app:app "$APP_HOME/.config" "$APP_HOME/.config/obs-studio" 2>/dev/null || 
 chmod 700 "$XDG"
 
 # Reset the StreamWizard profile's basic.ini (recording-path lockdown,
-# encoder defaults) to the shipped golden state on every boot. global.ini
-# is deliberately NOT force-reset here: OBS rewrites it itself to track
-# which scene collection is actually active, and overwriting that every
-# boot caused a reset loop (OBS could never find the scene collection
-# global.ini pointed at, so it kept recreating a fresh one - scenes never
-# persisted across restarts). global.ini is only seeded once, like the
-# websocket config below. plugin_config/logs/crashes/basic/scenes are
-# left alone for the same reason - OBS, not us, owns their contents.
+# encoder defaults) to the shipped golden state on every boot. user.ini
+# (OBS 30+ moved the active-profile/scene-collection pointer here from the
+# legacy global.ini - global.ini is only read once as a migration source
+# for upgrades from pre-31 installs, which doesn't apply to a fresh image,
+# so we seed user.ini directly instead) is deliberately NOT force-reset:
+# OBS rewrites it itself to track which scene collection is actually
+# active, and overwriting that every boot caused a reset loop (OBS could
+# never find the scene collection user.ini pointed at, so it kept
+# recreating a fresh one - scenes never persisted across restarts).
+# user.ini is only seeded once, like the websocket config below.
+# plugin_config/logs/crashes/basic/scenes are left alone for the same
+# reason - OBS, not us, owns their contents.
 GOLDEN_CFG=/opt/obs-golden-config/obs-studio
 if [ -d "$GOLDEN_CFG" ]; then
   rsync -a --delete \
     --exclude 'plugin_config/' --exclude 'logs/' --exclude 'crashes/' \
-    --exclude 'basic/scenes/' --exclude 'global.ini' \
+    --exclude 'basic/scenes/' --exclude 'user.ini' \
     "$GOLDEN_CFG/" "$APP_HOME/.config/obs-studio/"
-  if [ ! -f "$APP_HOME/.config/obs-studio/global.ini" ] && [ -f "$GOLDEN_CFG/global.ini" ]; then
-    cp "$GOLDEN_CFG/global.ini" "$APP_HOME/.config/obs-studio/global.ini"
+  if [ ! -f "$APP_HOME/.config/obs-studio/user.ini" ] && [ -f "$GOLDEN_CFG/user.ini" ]; then
+    cp "$GOLDEN_CFG/user.ini" "$APP_HOME/.config/obs-studio/user.ini"
   fi
   chown -R app:app "$APP_HOME/.config/obs-studio"
   log "restored golden OBS config (StreamWizard profile reset to shipped state)"
@@ -220,15 +224,18 @@ BWRAP_ARGS+=(
 )
 
 # Settings lockdown was tried here as read-only bwrap binds over
-# global.ini/basic.ini/the websocket config, layered on top of the
-# writable .config/obs-studio bind above. Reverted: OBS doesn't just read
-# these files, it re-saves them at various points (e.g. switching to a
-# profile re-saves that profile's basic.ini; obs-websocket periodically
-# re-saves its own config.json) - with the file read-only, that save
-# fails, and for basic.ini specifically that crashed the whole obs process
-# (observed: switching to the StreamWizard profile killed the container).
-# Settings immutability across restarts is instead handled entirely by
-# the golden-config rsync restore above, which resets these files on
+# user.ini/basic.ini/the websocket config, layered on top of the writable
+# .config/obs-studio bind above. Reverted: OBS doesn't just read these
+# files, it re-saves them at various points (e.g. switching to a profile
+# re-saves that profile's basic.ini; obs-websocket periodically re-saves
+# its own config.json) - with the file read-only, that save fails and gets
+# logged as a non-fatal error (confirmed for the websocket config; never
+# fully ruled out for basic.ini, since a separate bug - the lockdown
+# plugin deleteLater()'ing widgets OBS itself holds raw pointers to - was
+# the confirmed cause of the profile-switch crash and got fixed
+# separately, see plugin/src/lockdown-plugin.cpp). Settings immutability
+# across restarts is instead handled entirely by the golden-config rsync
+# restore above, which resets these files on
 # every boot without needing them to be read-only *during* a session.
 
 log "launching OBS (idle, no auto-stream), jailed via bwrap"

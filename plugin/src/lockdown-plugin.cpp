@@ -1,16 +1,25 @@
 // Appliance UI/hotkey lockdown plugin.
 //
-// Removes the Record/Replay Buffer/Virtual Camera/Settings widgets from the
-// OBS main window so they're not just hidden but gone
-// (deleteLater(), not hide()), clears every registered hotkey's key
+// Disables and hides the Record/Replay Buffer/Virtual Camera/Settings
+// widgets from the OBS main window, clears every registered hotkey's key
 // bindings (including Start/Stop Streaming - this appliance only needs
 // streaming controllable via the UI button and obs-websocket, not a
 // physical key combo), and reacts to recording/replay-buffer start as a
 // fallback kill-switch. This does NOT replace the other lockdown layers
-// (obs-websocket auth, unwritable recording output path, read-only config
-// binds) - obs-websocket and any other in-process caller still reach
+// (obs-websocket auth, unwritable recording output path) - obs-websocket
+// and any other in-process caller still reach
 // obs_frontend_recording_start()/etc directly, bypassing the UI and hotkeys
 // entirely.
+//
+// We deliberately use hide()/setEnabled(false), NOT deleteLater(): OBSBasic
+// (OBS's main window class) keeps raw pointers to these exact widgets as
+// member variables and dereferences them later from its own code - e.g.
+// refreshing button state after a profile switch. deleteLater() destroys
+// the QObject once the event loop turns over, so the next time OBS's own
+// code touches that now-dangling pointer it segfaults with no graceful
+// error logged. Observed in testing: switching profiles reliably crashed
+// the whole obs process (and therefore the container) until this was
+// changed from delete to hide+disable.
 //
 // IMPORTANT: the objectName()s below are best-effort guesses based on
 // common OBS Qt widget naming conventions, NOT verified against the actual
@@ -53,27 +62,28 @@ void RemoveByObjectName(QMainWindow *win, const char *const *names)
 		if (QAction *action = win->findChild<QAction *>(names[i])) {
 			action->setEnabled(false);
 			action->setVisible(false);
-			action->deleteLater();
 		}
 		if (QPushButton *btn = win->findChild<QPushButton *>(names[i])) {
 			btn->setEnabled(false);
 			btn->setVisible(false);
-			btn->deleteLater();
 		}
 	}
 }
 
-// Strips every entry from the Tools menu. The appliance has no use for any
-// of OBS's bundled Tools (Auto-Configuration Wizard, Output Timer, Auto
-// Replay Buffer Timer, etc.) - if a specific tool ever needs to stay
-// reachable, match on action->text() here instead of removing all of them.
+// Hides every entry in the Tools menu. The appliance has no use for any of
+// OBS's bundled Tools (Auto-Configuration Wizard, Output Timer, Auto Replay
+// Buffer Timer, etc.) - if a specific tool ever needs to stay reachable,
+// match on action->text() here instead of hiding all of them. setVisible
+// rather than deleteLater for the same dangling-pointer reason as above.
 void StripToolsMenu(QMainWindow *win)
 {
 	QMenu *toolsMenu = win->findChild<QMenu *>("menuTools");
 	if (!toolsMenu)
 		return;
-	for (QAction *action : toolsMenu->actions())
-		action->deleteLater();
+	for (QAction *action : toolsMenu->actions()) {
+		action->setEnabled(false);
+		action->setVisible(false);
+	}
 }
 
 // obs_enum_hotkeys() walks every hotkey registered in the process, not just
