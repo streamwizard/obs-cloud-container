@@ -222,7 +222,8 @@ void OnFrontendEvent(enum obs_frontend_event event, void *)
 		// libobs exposes no veto hook for *_STARTING - this only reacts
 		// after the fact. Real prevention is the UI/hotkey removal above
 		// plus the unwritable RecFilePath/FilePath baked into basic.ini
-		// (see golden-config/), not this callback.
+		// (seeded from the S3 template by obs-instance-manager), not this
+		// callback.
 		obs_frontend_recording_stop();
 		break;
 	case OBS_FRONTEND_EVENT_REPLAY_BUFFER_STARTING:

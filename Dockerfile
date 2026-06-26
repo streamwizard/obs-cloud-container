@@ -50,12 +50,10 @@ RUN apt-get update \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
 
-# aitum-multistream and vertical-canvas used to be installed here at build
-# time. They're now supplied at runtime via host-plugins/ (mounted to
-# /opt/extra-plugins by docker-compose.yml, copied into place by
-# entrypoint.sh before the bwrap jail starts) like any other plugin, so
-# they can be swapped/updated without rebuilding the image. See
-# host-plugins/README.md.
+# Plugins are supplied at runtime via the OBS config S3 template
+# (obs-templates/default/plugins/) which pullObsConfig merges into every
+# instance's ~/.config/obs-studio on each start. No image rebuild needed
+# to add or update plugins — update S3 and restart instances.
 
 RUN userdel -r ubuntu 2>/dev/null || true; groupdel ubuntu 2>/dev/null || true; \
     groupadd -g 1000 app && \
@@ -76,7 +74,6 @@ COPY --chown=app:app rc.xml /home/app/.config/openbox/rc.xml
 RUN chown -R app:app /home/app
 
 COPY xorg.conf.template /etc/X11/xorg.conf.template
-COPY golden-config/obs-studio /opt/obs-golden-config/obs-studio
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

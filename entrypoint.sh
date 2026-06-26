@@ -63,49 +63,8 @@ for dev in /dev/dri/card* /dev/dri/renderD*; do
 done
 
 mkdir -p "$XDG" "$APP_HOME/.cache" "$APP_HOME/.config/obs-studio"
-chown -R app:app "$XDG" "$APP_HOME/.cache"
-chown app:app "$APP_HOME/.config" "$APP_HOME/.config/obs-studio" 2>/dev/null || true
+chown -R app:app "$XDG" "$APP_HOME/.cache" "$APP_HOME/.config/obs-studio"
 chmod 700 "$XDG"
-
-# Reset the StreamWizard profile's basic.ini (recording-path lockdown,
-# encoder defaults) to the shipped golden state on every boot. user.ini
-# (OBS 30+ moved the active-profile/scene-collection pointer here from the
-# legacy global.ini - global.ini is only read once as a migration source
-# for upgrades from pre-31 installs, which doesn't apply to a fresh image,
-# so we seed user.ini directly instead) is deliberately NOT force-reset:
-# OBS rewrites it itself to track which scene collection is actually
-# active, and overwriting that every boot caused a reset loop (OBS could
-# never find the scene collection user.ini pointed at, so it kept
-# recreating a fresh one - scenes never persisted across restarts).
-# user.ini is only seeded once, like the websocket config below.
-# plugin_config/logs/crashes/basic/scenes are left alone for the same
-# reason - OBS, not us, owns their contents.
-GOLDEN_CFG=/opt/obs-golden-config/obs-studio
-if [ -d "$GOLDEN_CFG" ]; then
-  rsync -a --delete \
-    --exclude 'plugin_config/' --exclude 'logs/' --exclude 'crashes/' \
-    --exclude 'basic/scenes/' --exclude 'user.ini' \
-    "$GOLDEN_CFG/" "$APP_HOME/.config/obs-studio/"
-  if [ ! -f "$APP_HOME/.config/obs-studio/user.ini" ] && [ -f "$GOLDEN_CFG/user.ini" ]; then
-    cp "$GOLDEN_CFG/user.ini" "$APP_HOME/.config/obs-studio/user.ini"
-  fi
-  chown -R app:app "$APP_HOME/.config/obs-studio"
-  log "restored golden OBS config (StreamWizard profile reset to shipped state)"
-fi
-
-# One-time seed of the real StreamWizard scene collection (boilerplate
-# scenes/sources), exported from an actual OBS instance rather than
-# hand-authored - same "only seed once, never force-reset" treatment as
-# user.ini, so edits made while building it out further (more scenes,
-# sources, filters) persist across restarts instead of getting wiped.
-SCENES_DIR="$APP_HOME/.config/obs-studio/basic/scenes"
-GOLDEN_SCENE="$GOLDEN_CFG/basic/scenes/StreamWizard.json"
-if [ -f "$GOLDEN_SCENE" ] && [ ! -f "$SCENES_DIR/StreamWizard.json" ]; then
-  mkdir -p "$SCENES_DIR"
-  cp "$GOLDEN_SCENE" "$SCENES_DIR/StreamWizard.json"
-  chown app:app "$SCENES_DIR/StreamWizard.json"
-  log "seeded StreamWizard scene collection"
-fi
 
 rm -f "$APP_HOME/.config/obs-studio/plugin_config/obs-browser/SingletonLock" \
       "$APP_HOME/.config/obs-studio/plugin_config/obs-browser/SingletonSocket" \
@@ -286,10 +245,12 @@ BWRAP_ARGS+=(
 # fully ruled out for basic.ini, since a separate bug - the lockdown
 # plugin deleteLater()'ing widgets OBS itself holds raw pointers to - was
 # the confirmed cause of the profile-switch crash and got fixed
-# separately, see plugin/src/lockdown-plugin.cpp). Settings immutability
-# across restarts is instead handled entirely by the golden-config rsync
-# restore above, which resets these files on
-# every boot without needing them to be read-only *during* a session.
+# separately, see plugin/src/lockdown-plugin.cpp). Config is instead
+# seeded by the obs-instance-manager: before this container starts it
+# pulls the S3 template (base layer: plugins, default profile/scenes)
+# plus the instance's own saved config into the bind-mounted
+# .config/obs-studio dir - so nothing needs to be read-only *during* a
+# session.
 
 # bwrap's own synthetic root (anything not explicitly bound above, e.g. /)
 # is writable by default, which let OBS's file dialogs create new folders
