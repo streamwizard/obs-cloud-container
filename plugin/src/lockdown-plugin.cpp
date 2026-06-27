@@ -21,12 +21,10 @@
 // the whole obs process (and therefore the container) until this was
 // changed from delete to hide+disable.
 //
-// IMPORTANT: the objectName()s below are best-effort guesses based on
-// common OBS Qt widget naming conventions, NOT verified against the actual
-// OBS 32.1.2 window-basic-main.ui/.cpp source. Before relying on this in
-// production, inspect a running instance's widget tree (e.g. dump
-// QObject::findChildren<QWidget*>() names at FINISHED_LOADING into the log)
-// and correct this list.
+// Menus are found by visible text via FindTopMenu() rather than objectName,
+// since OBS's internal naming conventions vary between releases. Widget
+// objectNames are still used for the main-window buttons/actions in
+// kActionNames/kButtonNames - if those miss, DumpUI() logs the real names.
 
 #include <obs.h>
 #include <obs-module.h>
@@ -77,10 +75,14 @@ const char *const kToolsKeepText[] = {
 	nullptr,
 };
 
-// View menu: keep only Stats and the scene/image list mode toggle.
-const char *const kViewKeepText[] = {
-	"stats",
-	"scene list",
+// View menu: hide these specific entries; everything else (Scene List Mode,
+// Stats, and the checked toolbar/status-bar toggles) stays. Hide-list rather
+// than keep-list so we don't accidentally remove the toolbar toggles.
+const char *const kViewHideText[] = {
+	"reset ui",
+	"fullscreen",
+	"multiview",
+	"always on top",
 	nullptr,
 };
 
@@ -149,18 +151,73 @@ void RemoveByObjectName(QMainWindow *win, const char *const *names)
 	}
 }
 
-// Hides every entry inside a menu (the menu itself stays in the menu bar,
-// just empty/inert). Used for menus we want fully blocked but can't remove
-// from the bar via menuAction() reliably. setVisible/setEnabled rather than
-// deleteLater for the same dangling-pointer reason as above.
-void HideAllMenuEntries(QMainWindow *win, const char *menuObjectName)
+// Finds a top-level menu bar menu by visible text (& accelerators stripped,
+// case-insensitive substring match). More robust than findChild<QMenu*>(name)
+// because OBS's internal objectName conventions vary between releases
+// (e.g. menuFile vs menu_File vs menu_file).
+static QMenu *FindTopMenu(QMainWindow *win, const char *titleSubstr)
 {
-	QMenu *menu = win->findChild<QMenu *>(menuObjectName);
+	QMenuBar *bar = win->menuBar();
+	if (!bar)
+		return nullptr;
+	QString needle = QString::fromLatin1(titleSubstr);
+	for (QAction *act : bar->actions()) {
+		QString title = act->text();
+		title.remove('&');
+		if (title.contains(needle, Qt::CaseInsensitive))
+			return act->menu();
+	}
+	return nullptr;
+}
+
+static void HideAction(QAction *action)
+{
+	action->setEnabled(false);
+	action->setVisible(false);
+}
+
+// True if the action's visible text contains any of substrings
+// (case-insensitive). The '&' mnemonic markers are stripped first so a marker
+// sitting inside a matched span (e.g. "Always on &Top" vs "always on top")
+// doesn't break the match.
+static bool ActionTextMatches(QAction *action, const char *const *substrings)
+{
+	QString text = action->text();
+	text.remove('&');
+	for (int i = 0; substrings[i]; ++i) {
+		if (text.contains(QString::fromLatin1(substrings[i]), Qt::CaseInsensitive))
+			return true;
+	}
+	return false;
+}
+
+static void HideAllEntries(QMenu *menu)
+{
+	if (!menu)
+		return;
+	for (QAction *action : menu->actions())
+		HideAction(action);
+}
+
+// Inverse of TrimEntries: hides only the actions whose text matches one of
+// hideSubstrings, leaving everything else visible.
+static void HideEntries(QMenu *menu, const char *const *hideSubstrings)
+{
 	if (!menu)
 		return;
 	for (QAction *action : menu->actions()) {
-		action->setEnabled(false);
-		action->setVisible(false);
+		if (ActionTextMatches(action, hideSubstrings))
+			HideAction(action);
+	}
+}
+
+static void TrimEntries(QMenu *menu, const char *const *keepSubstrings)
+{
+	if (!menu)
+		return;
+	for (QAction *action : menu->actions()) {
+		if (!ActionTextMatches(action, keepSubstrings))
+			HideAction(action);
 	}
 }
 
@@ -189,31 +246,6 @@ void TrimDockButtons(QMainWindow *win, const char *dockTitleSubstr,
 				btn->setEnabled(false);
 				btn->setVisible(false);
 			}
-		}
-	}
-}
-
-// Hides every entry in a menu except ones whose text contains one of
-// keepSubstrings (case-insensitive). Also works on submenus found anywhere
-// in the window's widget tree (e.g. the Log Files submenu under Help).
-void TrimMenuKeepingText(QMainWindow *win, const char *menuObjectName,
-			  const char *const *keepSubstrings)
-{
-	QMenu *menu = win->findChild<QMenu *>(menuObjectName);
-	if (!menu)
-		return;
-	for (QAction *action : menu->actions()) {
-		bool keep = false;
-		for (int i = 0; keepSubstrings[i]; ++i) {
-			if (action->text().contains(QString::fromLatin1(keepSubstrings[i]),
-						     Qt::CaseInsensitive)) {
-				keep = true;
-				break;
-			}
-		}
-		if (!keep) {
-			action->setEnabled(false);
-			action->setVisible(false);
 		}
 	}
 }
@@ -250,16 +282,22 @@ void OnFrontendEvent(enum obs_frontend_event event, void *)
 		DumpUI(win);
 		RemoveByObjectName(win, kActionNames);
 		RemoveByObjectName(win, kButtonNames);
-		// Empty menus that can't be hidden reliably via menuAction()
-		HideAllMenuEntries(win, "menuFile");
-		HideAllMenuEntries(win, "menuProfile");
-		HideAllMenuEntries(win, "menuSceneCollection");
-		TrimMenuKeepingText(win, "menuTools", kToolsKeepText);
-		// Help: keep only "Log Files", then trim that submenu to "View Current Log"
-		TrimMenuKeepingText(win, "menuHelp", kHelpKeepText);
-		TrimMenuKeepingText(win, "menuLogFiles", kLogFilesKeepText);
-		// View: keep only Stats and scene list mode
-		TrimMenuKeepingText(win, "menuView", kViewKeepText);
+		// Empty menus entirely (looked up by visible menu bar text)
+		HideAllEntries(FindTopMenu(win, "File"));
+		HideAllEntries(FindTopMenu(win, "Profile"));
+		HideAllEntries(FindTopMenu(win, "Scene Collection"));
+		// Tools: keep only Source Profiler (plugin-provided, may not exist)
+		TrimEntries(FindTopMenu(win, "Tools"), kToolsKeepText);
+		// View: hide Reset UI, Fullscreen, Multiview, Always on Top; keep the rest
+		HideEntries(FindTopMenu(win, "View"), kViewHideText);
+		// Help: keep only "Log Files" submenu entry, then within it only "View Current Log"
+		if (QMenu *help = FindTopMenu(win, "Help")) {
+			TrimEntries(help, kHelpKeepText);
+			for (QAction *act : help->actions()) {
+				if (QMenu *sub = act->menu())
+					TrimEntries(sub, kLogFilesKeepText);
+			}
+		}
 		// Aitum dock: keep only the stream button
 		TrimDockButtons(win, "aitum", kAitumKeepButtons);
 		DisableAllHotkeys();
