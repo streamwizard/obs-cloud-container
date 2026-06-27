@@ -34,7 +34,9 @@
 
 #include <QMainWindow>
 #include <QAction>
+#include <QAbstractButton>
 #include <QPushButton>
+#include <QDockWidget>
 #include <QMenu>
 #include <QMenuBar>
 #include <QString>
@@ -48,33 +50,45 @@ const char *const kActionNames[] = {
 	"actionStartRecording",   "actionStopRecording",
 	"actionStartReplayBuffer", "actionStopReplayBuffer",
 	"actionStartVirtualCam",  "actionStopVirtualCam",
-	// "action_Settings", "actionSettings", -- temporarily re-enabled
+	"action_Settings",        "actionSettings",
 	nullptr,
 };
 
 const char *const kButtonNames[] = {
-	"recordButton", "replayBufferButton", "vcamButton",
-	// "settingsButton", -- temporarily re-enabled
+	"recordButton", "replayBufferButton", "vcamButton", "settingsButton",
 	nullptr,
 };
 
-// Top-level menu-bar menus to hide entirely, including their entry in the
-// menu bar itself (not just the items inside). objectName()s are
-// best-effort guesses following the same "menuXxx" convention as
-// "menuTools" (already confirmed working in testing), not verified
-// against the OBS 32.1.2 source.
-const char *const kMenusToHide[] = {
-	"menuFile",
-	"menuProfile",
-	nullptr,
-};
-
-// Help menu entries whose text contains any of these (case-insensitive)
-// are kept; everything else in Help is hidden. We only want to leave a
-// way to get at log files for support/debugging - "Help Portal", "Visit
-// Website", "Discord", "Check for Updates", "About", etc. all go.
+// Help menu: keep only the "Log Files" submenu entry; everything else is hidden.
 const char *const kHelpKeepText[] = {
-	"log",
+	"log files",
+	nullptr,
+};
+
+// Within the Log Files submenu: keep only "View Current Log".
+const char *const kLogFilesKeepText[] = {
+	"view current log",
+	nullptr,
+};
+
+// Tools menu: keep only the Source Profiler entry (added by a plugin, may not exist).
+const char *const kToolsKeepText[] = {
+	"source profiler",
+	nullptr,
+};
+
+// View menu: keep only Stats and the scene/image list mode toggle.
+const char *const kViewKeepText[] = {
+	"stats",
+	"scene list",
+	nullptr,
+};
+
+// Aitum dock: keep only the stream button; everything else (record, replay,
+// virtual cam, settings, heart, refresh) is hidden. Matched against each
+// button's text() and toolTip() case-insensitively.
+const char *const kAitumKeepButtons[] = {
+	"stream",
 	nullptr,
 };
 
@@ -108,6 +122,16 @@ void DumpUI(QMainWindow *win)
 		blog(LOG_INFO, "[appliance-lockdown] button objectName=\"%s\" text=\"%s\"",
 		     qPrintable(btn->objectName()), qPrintable(btn->text()));
 	}
+	for (QDockWidget *dock : win->findChildren<QDockWidget *>()) {
+		blog(LOG_INFO, "[appliance-lockdown] dock objectName=\"%s\" title=\"%s\"",
+		     qPrintable(dock->objectName()), qPrintable(dock->windowTitle()));
+		for (QAbstractButton *btn : dock->findChildren<QAbstractButton *>()) {
+			blog(LOG_INFO,
+			     "[appliance-lockdown]   dock-btn objectName=\"%s\" text=\"%s\" tooltip=\"%s\"",
+			     qPrintable(btn->objectName()), qPrintable(btn->text()),
+			     qPrintable(btn->toolTip()));
+		}
+	}
 	blog(LOG_INFO, "[appliance-lockdown] ---- UI dump end ----");
 }
 
@@ -126,9 +150,9 @@ void RemoveByObjectName(QMainWindow *win, const char *const *names)
 }
 
 // Hides every entry inside a menu (the menu itself stays in the menu bar,
-// just empty/inert). Used for Tools, where we don't want any of OBS's
-// bundled tools reachable. setVisible/setEnabled rather than deleteLater
-// for the same dangling-pointer reason as above.
+// just empty/inert). Used for menus we want fully blocked but can't remove
+// from the bar via menuAction() reliably. setVisible/setEnabled rather than
+// deleteLater for the same dangling-pointer reason as above.
 void HideAllMenuEntries(QMainWindow *win, const char *menuObjectName)
 {
 	QMenu *menu = win->findChild<QMenu *>(menuObjectName);
@@ -140,23 +164,38 @@ void HideAllMenuEntries(QMainWindow *win, const char *menuObjectName)
 	}
 }
 
-// Hides a menu's own entry in the menu bar (menuAction()), so the whole
-// menu disappears rather than just emptying its contents. Used for
-// File/Profile, which this appliance has no legitimate use for at all.
-void HideMenuEntirely(QMainWindow *win, const char *menuObjectName)
+// In every dock whose windowTitle() contains dockTitleSubstr, hides all
+// buttons (QPushButton, QToolButton, etc.) except those whose text() or
+// toolTip() contains one of keepSubstrings (case-insensitive). Used to
+// strip Aitum's record/settings/extra buttons while keeping only stream.
+void TrimDockButtons(QMainWindow *win, const char *dockTitleSubstr,
+		     const char *const *keepSubstrings)
 {
-	QMenu *menu = win->findChild<QMenu *>(menuObjectName);
-	if (!menu)
-		return;
-	if (QAction *menuAction = menu->menuAction()) {
-		menuAction->setEnabled(false);
-		menuAction->setVisible(false);
+	QString needle = QString::fromLatin1(dockTitleSubstr);
+	for (QDockWidget *dock : win->findChildren<QDockWidget *>()) {
+		if (!dock->windowTitle().contains(needle, Qt::CaseInsensitive))
+			continue;
+		for (QAbstractButton *btn : dock->findChildren<QAbstractButton *>()) {
+			bool keep = false;
+			for (int i = 0; keepSubstrings[i]; ++i) {
+				QString sub = QString::fromLatin1(keepSubstrings[i]);
+				if (btn->text().contains(sub, Qt::CaseInsensitive) ||
+				    btn->toolTip().contains(sub, Qt::CaseInsensitive)) {
+					keep = true;
+					break;
+				}
+			}
+			if (!keep) {
+				btn->setEnabled(false);
+				btn->setVisible(false);
+			}
+		}
 	}
 }
 
 // Hides every entry in a menu except ones whose text contains one of
-// keepSubstrings (case-insensitive). Used for Help, to leave only the
-// log-files entry reachable.
+// keepSubstrings (case-insensitive). Also works on submenus found anywhere
+// in the window's widget tree (e.g. the Log Files submenu under Help).
 void TrimMenuKeepingText(QMainWindow *win, const char *menuObjectName,
 			  const char *const *keepSubstrings)
 {
@@ -211,10 +250,18 @@ void OnFrontendEvent(enum obs_frontend_event event, void *)
 		DumpUI(win);
 		RemoveByObjectName(win, kActionNames);
 		RemoveByObjectName(win, kButtonNames);
-		HideAllMenuEntries(win, "menuTools");
-		for (int i = 0; kMenusToHide[i]; ++i)
-			HideMenuEntirely(win, kMenusToHide[i]);
+		// Empty menus that can't be hidden reliably via menuAction()
+		HideAllMenuEntries(win, "menuFile");
+		HideAllMenuEntries(win, "menuProfile");
+		HideAllMenuEntries(win, "menuSceneCollection");
+		TrimMenuKeepingText(win, "menuTools", kToolsKeepText);
+		// Help: keep only "Log Files", then trim that submenu to "View Current Log"
 		TrimMenuKeepingText(win, "menuHelp", kHelpKeepText);
+		TrimMenuKeepingText(win, "menuLogFiles", kLogFilesKeepText);
+		// View: keep only Stats and scene list mode
+		TrimMenuKeepingText(win, "menuView", kViewKeepText);
+		// Aitum dock: keep only the stream button
+		TrimDockButtons(win, "aitum", kAitumKeepButtons);
 		DisableAllHotkeys();
 		break;
 	}
