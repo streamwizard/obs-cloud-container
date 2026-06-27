@@ -48,13 +48,13 @@ const char *const kActionNames[] = {
 	"actionStartRecording",   "actionStopRecording",
 	"actionStartReplayBuffer", "actionStopReplayBuffer",
 	"actionStartVirtualCam",  "actionStopVirtualCam",
-	"action_Settings",        "actionSettings",
+	// "action_Settings", "actionSettings", -- temporarily re-enabled
 	nullptr,
 };
 
 const char *const kButtonNames[] = {
 	"recordButton", "replayBufferButton", "vcamButton",
-	"settingsButton",
+	// "settingsButton", -- temporarily re-enabled
 	nullptr,
 };
 
