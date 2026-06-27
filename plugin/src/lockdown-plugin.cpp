@@ -86,11 +86,17 @@ const char *const kViewHideText[] = {
 	nullptr,
 };
 
-// Aitum dock: keep only the stream button; everything else (record, replay,
-// virtual cam, settings, heart, refresh) is hidden. Matched against each
-// button's text() and toolTip() case-insensitively.
-const char *const kAitumKeepButtons[] = {
-	"stream",
+// obs-vertical-canvas dock ("Vertical" canvas). Toolbar buttons to hide by
+// their stable objectName: record, backtrack-enable, backtrack/replay clip,
+// and virtual camera. The stream buttons (canvasStream/canvasStreamMulti) and
+// the scene add/remove/link/preview controls all stay. The settings gear,
+// "Support Aitum" donate button and aitum.tv link button have no objectName
+// and are handled separately in LockdownVerticalCanvas().
+const char *const kVerticalHideButtons[] = {
+	"canvasRecord",
+	"canvasReplay",
+	"canvasBacktrackEnable",
+	"canvasVirtualCam",
 	nullptr,
 };
 
@@ -221,28 +227,44 @@ static void TrimEntries(QMenu *menu, const char *const *keepSubstrings)
 	}
 }
 
-// In every dock whose windowTitle() contains dockTitleSubstr, hides all
-// buttons (QPushButton, QToolButton, etc.) except those whose text() or
-// toolTip() contains one of keepSubstrings (case-insensitive). Used to
-// strip Aitum's record/settings/extra buttons while keeping only stream.
-void TrimDockButtons(QMainWindow *win, const char *dockTitleSubstr,
-		     const char *const *keepSubstrings)
+// True if this dock is the obs-vertical-canvas main dock. Identified by a
+// child button we know it owns rather than by dock objectName/title, so it
+// keeps working regardless of how OBS wraps the dock or what locale the title
+// is in. (The Scenes/Sources/Transitions sub-docks don't own these buttons.)
+static bool IsVerticalCanvasDock(QDockWidget *dock)
 {
-	QString needle = QString::fromLatin1(dockTitleSubstr);
+	return dock->findChild<QAbstractButton *>("canvasStream") != nullptr ||
+	       dock->findChild<QAbstractButton *>("canvasRecord") != nullptr;
+}
+
+// Locks down the obs-vertical-canvas dock: hides the record/replay/backtrack/
+// virtual-cam buttons (by objectName), the settings gear (by its "icon-gear"
+// class property), and the "Support Aitum" donate + aitum.tv link buttons (by
+// "aitum" in their tooltip). Hiding the gear also blocks the resolution and
+// bitrate fields, which live only in the dialog that gear opens. All matching
+// is scoped to this dock so we don't catch a gear/aitum button elsewhere in
+// the UI (the audio mixer, scene transitions, and Aitum Multistream dock also
+// use gear icons / "aitum" text). The stream buttons and the scene add/remove/
+// link/preview controls are left untouched.
+void LockdownVerticalCanvas(QMainWindow *win)
+{
 	for (QDockWidget *dock : win->findChildren<QDockWidget *>()) {
-		if (!dock->windowTitle().contains(needle, Qt::CaseInsensitive))
+		if (!IsVerticalCanvasDock(dock))
 			continue;
 		for (QAbstractButton *btn : dock->findChildren<QAbstractButton *>()) {
-			bool keep = false;
-			for (int i = 0; keepSubstrings[i]; ++i) {
-				QString sub = QString::fromLatin1(keepSubstrings[i]);
-				if (btn->text().contains(sub, Qt::CaseInsensitive) ||
-				    btn->toolTip().contains(sub, Qt::CaseInsensitive)) {
-					keep = true;
+			bool hide = false;
+			const QString name = btn->objectName();
+			for (int i = 0; kVerticalHideButtons[i]; ++i) {
+				if (name == QLatin1String(kVerticalHideButtons[i])) {
+					hide = true;
 					break;
 				}
 			}
-			if (!keep) {
+			if (btn->property("class").toString() == QLatin1String("icon-gear"))
+				hide = true; // settings gear -> resolution/bitrate dialog
+			if (btn->toolTip().contains(QLatin1String("aitum"), Qt::CaseInsensitive))
+				hide = true; // Support Aitum donate + aitum.tv link
+			if (hide) {
 				btn->setEnabled(false);
 				btn->setVisible(false);
 			}
@@ -298,8 +320,8 @@ void OnFrontendEvent(enum obs_frontend_event event, void *)
 					TrimEntries(sub, kLogFilesKeepText);
 			}
 		}
-		// Aitum dock: keep only the stream button
-		TrimDockButtons(win, "aitum", kAitumKeepButtons);
+		// Vertical canvas: hide record/replay/vcam/gear/donate/link buttons
+		LockdownVerticalCanvas(win);
 		DisableAllHotkeys();
 		break;
 	}
