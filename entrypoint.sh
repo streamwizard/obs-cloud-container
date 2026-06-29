@@ -226,6 +226,10 @@ for d in bin sbin lib lib64; do
   fi
 done
 [ -d /tmp/.X11-unix ] && BWRAP_ARGS+=(--bind /tmp/.X11-unix /tmp/.X11-unix)
+# CEF (browser source) uses /dev/shm for IPC between its browser/GPU/renderer
+# processes. bwrap's --dev /dev creates a minimal synthetic devtmpfs that does
+# not include /dev/shm, so we bind the host's /dev/shm explicitly.
+[ -d /dev/shm ] && BWRAP_ARGS+=(--bind /dev/shm /dev/shm)
 BWRAP_ARGS+=(
   --bind "$XDG" "$XDG"
   --dir "$APP_HOME"
@@ -233,6 +237,12 @@ BWRAP_ARGS+=(
   --bind "$APP_HOME/.cache" "$APP_HOME/.cache"
   --bind "$APP_HOME/media" "$APP_HOME/media"
   --chdir "$APP_HOME"
+  # Pass browser flags directly into the jail so they bypass the as_app env
+  # whitelist. --no-sandbox skips chrome-sandbox (safe inside Docker with
+  # seccomp/apparmor=unconfined). --disable-dev-shm-usage tells CEF to fall
+  # back to /tmp if /dev/shm is still somehow unavailable. --disable-gpu
+  # prevents the GPU process from racing with the blacklisted-driver detection.
+  --setenv OBS_BROWSER_EXTRA_FLAGS "--no-sandbox --disable-dev-shm-usage --disable-gpu"
 )
 
 # Settings lockdown was tried here as read-only bwrap binds over
