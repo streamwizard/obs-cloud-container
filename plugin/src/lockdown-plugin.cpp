@@ -341,9 +341,14 @@ void OnFrontendEvent(enum obs_frontend_event event, void *)
 
 } // namespace
 
+// Comment out this define to disable all lockdown (full OBS UI access).
+#define LOCKDOWN_ENABLED
+
 bool obs_module_load(void)
 {
+#ifdef LOCKDOWN_ENABLED
 	obs_frontend_add_event_callback(OnFrontendEvent, nullptr);
+#endif
 	return true;
 }
 
