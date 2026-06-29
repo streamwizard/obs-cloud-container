@@ -48,12 +48,11 @@ const char *const kActionNames[] = {
 	"actionStartRecording",   "actionStopRecording",
 	"actionStartReplayBuffer", "actionStopReplayBuffer",
 	"actionStartVirtualCam",  "actionStopVirtualCam",
-	"action_Settings",        "actionSettings",
 	nullptr,
 };
 
 const char *const kButtonNames[] = {
-	"recordButton", "replayBufferButton", "vcamButton", "settingsButton",
+	"recordButton", "replayBufferButton", "vcamButton",
 	nullptr,
 };
 
@@ -301,7 +300,6 @@ void OnFrontendEvent(enum obs_frontend_event event, void *)
 		auto *win = (QMainWindow *)obs_frontend_get_main_window();
 		if (!win)
 			break;
-		DumpUI(win);
 		RemoveByObjectName(win, kActionNames);
 		RemoveByObjectName(win, kButtonNames);
 		// Empty menus entirely (looked up by visible menu bar text)
