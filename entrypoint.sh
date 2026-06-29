@@ -225,6 +225,13 @@ for d in bin sbin lib lib64; do
     BWRAP_ARGS+=(--ro-bind "/$d" "/$d")
   fi
 done
+# CEF needs a writable /tmp: Chromium's process singleton creates its
+# SingletonSocket in a temp dir under /tmp, and crashpad/other helpers also
+# write there. Without this, /tmp is caught by `--remount-ro /` below and
+# CefInitialize() fails with "Exit code: 21", so no browser source renders.
+# A private tmpfs is its own mount, so --remount-ro / does not touch it
+# (same as /dev). Mounted before the X11 bind so the socket dir layers on top.
+BWRAP_ARGS+=(--tmpfs /tmp)
 [ -d /tmp/.X11-unix ] && BWRAP_ARGS+=(--bind /tmp/.X11-unix /tmp/.X11-unix)
 # CEF (browser source) uses /dev/shm for IPC between its browser/GPU/renderer
 # processes. bwrap's --dev /dev creates a minimal synthetic devtmpfs that does
@@ -239,10 +246,11 @@ BWRAP_ARGS+=(
   --chdir "$APP_HOME"
   # Pass browser flags directly into the jail so they bypass the as_app env
   # whitelist. --no-sandbox skips chrome-sandbox (safe inside Docker with
-  # seccomp/apparmor=unconfined). --disable-dev-shm-usage tells CEF to fall
-  # back to /tmp if /dev/shm is still somehow unavailable. --disable-gpu
-  # prevents the GPU process from racing with the blacklisted-driver detection.
-  --setenv OBS_BROWSER_EXTRA_FLAGS "--no-sandbox --disable-dev-shm-usage --disable-gpu"
+  # seccomp/apparmor=unconfined). --disable-gpu prevents the GPU process from
+  # racing with the blacklisted-driver detection. /dev/shm is bound rw above,
+  # so CEF uses it for IPC/shared memory (do NOT add --disable-dev-shm-usage:
+  # it forces shm onto /tmp).
+  --setenv OBS_BROWSER_EXTRA_FLAGS "--no-sandbox --disable-gpu"
 )
 
 # Settings lockdown was tried here as read-only bwrap binds over
