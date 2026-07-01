@@ -33,6 +33,7 @@ RUN apt-get update \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
         xserver-xorg-core \
+        xvfb \
         x11-xserver-utils \
         xauth \
         openbox \
@@ -43,10 +44,27 @@ RUN apt-get update \
         pulseaudio pulseaudio-utils \
         fonts-dejavu-core \
         libgl1 \
+        mesa-utils \
         bubblewrap \
         rsync \
+        wget \
         obs-studio \
  && apt-get purge -y software-properties-common gpg-agent \
+ && apt-get autoremove -y \
+ && rm -rf /var/lib/apt/lists/*
+
+# VirtualGL lets each per-instance container render OpenGL through the one
+# real GPU-bound Xorg ("3D X server", see ROLE=gpu-xserver in entrypoint.sh)
+# instead of each container owning the GPU's display/modesetting itself -
+# NVIDIA only allows one exclusive DRM master per physical GPU, so N
+# containers each running their own nvidia-driven Xorg cannot share one
+# card. Not in Ubuntu's apt repos, so pull the official release .deb.
+ARG VIRTUALGL_VERSION=3.1.1
+RUN wget -q "https://github.com/VirtualGL/virtualgl/releases/download/${VIRTUALGL_VERSION}/virtualgl_${VIRTUALGL_VERSION}_amd64.deb" -O /tmp/virtualgl.deb \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends /tmp/virtualgl.deb \
+ && rm -f /tmp/virtualgl.deb \
+ && apt-get purge -y wget \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
 
@@ -58,6 +76,7 @@ RUN apt-get update \
 RUN userdel -r ubuntu 2>/dev/null || true; groupdel ubuntu 2>/dev/null || true; \
     groupadd -g 1000 app && \
     useradd -u 1000 -g 1000 -m -d /home/app -s /bin/bash app && \
+    usermod -aG vglusers app 2>/dev/null || true; \
     mkdir -p /home/app/.config/openbox /home/app/.config/obs-studio /home/app/media && \
     touch /usr/bin/debug.log && chown app:app /usr/bin/debug.log && \
     chown root:root /usr/lib/x86_64-linux-gnu/obs-plugins/chrome-sandbox && \
@@ -76,6 +95,8 @@ RUN chown -R app:app /home/app
 COPY xorg.conf.template /etc/X11/xorg.conf.template
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY obs-go-live-autoconfirm.sh /usr/local/bin/obs-go-live-autoconfirm.sh
+RUN chmod +x /usr/local/bin/obs-go-live-autoconfirm.sh
 
 COPY --from=plugin-builder /src/plugin/build/appliance-lockdown.so \
      /usr/lib/x86_64-linux-gnu/obs-plugins/appliance-lockdown.so

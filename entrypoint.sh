@@ -1,7 +1,21 @@
 #!/usr/bin/env bash
 set -uo pipefail
 
-DISPLAY_NUM="${DISPLAY_NUM:-:0}"
+# ROLE selects which of two things this container instance is:
+#   gpu-xserver - the one real, GPU-bound Xorg per physical GPU (holds the
+#                 NVIDIA DRM master lease). Exactly one of these per node.
+#   instance (default) - a headless OBS instance. Runs its own lightweight
+#                 Xvfb (no GPU, no VT, no DRM master - so any number of
+#                 these can coexist) and renders through the shared
+#                 gpu-xserver via `vglrun`. See xorg.conf.template and the
+#                 VirtualGL comments below for why: NVIDIA only allows one
+#                 exclusive DRM master per physical GPU, so N containers
+#                 each running their own nvidia-driven Xorg cannot share
+#                 one card - VirtualGL lets many Xvfb-backed instances
+#                 share the one real GPU-bound Xorg instead.
+ROLE="${ROLE:-instance}"
+
+DISPLAY_NUM="${DISPLAY_NUM:-:10}"
 RESOLUTION="${RESOLUTION:-1920x1080}"
 GPU_BUSID="${GPU_BUSID:-PCI:0:16:0}"
 VNC_PORT="${VNC_PORT:-5900}"
@@ -9,6 +23,11 @@ NOVNC_PORT="${NOVNC_PORT:-6080}"
 WS_PORT="${OBS_WEBSOCKET_PORT:-4455}"
 WIDTH="${RESOLUTION%x*}"
 HEIGHT="${RESOLUTION#*x}"
+
+# Fixed display number of the shared gpu-xserver's real Xorg - a singleton
+# per node, so this never needs to be configurable per instance.
+GPU_XSERVER_DISPLAY=":0"
+GPU_XSOCKET_DIR=/opt/gpu-xsocket
 
 export DISPLAY="$DISPLAY_NUM"
 APP_HOME=/home/app
@@ -30,6 +49,65 @@ as_app() {
     "$@"
 }
 
+for dev in /dev/dri/card* /dev/dri/renderD*; do
+  [ -e "$dev" ] || continue
+  gid="$(stat -c '%g' "$dev")"
+  group="$(getent group "$gid" | cut -d: -f1)"
+  if [ -z "$group" ]; then
+    group="dri_$gid"
+    groupadd -g "$gid" "$group"
+  fi
+  usermod -aG "$group" app
+  log "granted app access to $dev (group $group, gid $gid)"
+done
+
+if [ "$ROLE" = "gpu-xserver" ]; then
+  cleanup() {
+    log "shutting down gpu-xserver..."
+    [ -n "${XORG_PID:-}" ] && kill "$XORG_PID" 2>/dev/null || true
+  }
+  trap cleanup TERM INT EXIT
+
+  sed -e "s/__WIDTH__/$WIDTH/" -e "s/__HEIGHT__/$HEIGHT/" \
+      -e "s#__BUSID__#$GPU_BUSID#" \
+      /etc/X11/xorg.conf.template > /etc/X11/xorg.conf
+
+  # A prior Xorg run can leave a stale lock behind if the container was
+  # killed rather than stopped cleanly.
+  DISPLAY_NUM_BARE="${GPU_XSERVER_DISPLAY#:}"
+  LOCK_FILE="/tmp/.X${DISPLAY_NUM_BARE}-lock"
+  SOCK_FILE="/tmp/.X11-unix/X${DISPLAY_NUM_BARE}"
+  if [ -e "$LOCK_FILE" ]; then
+    lock_pid="$(cat "$LOCK_FILE" 2>/dev/null | tr -d '[:space:]')"
+    if [ -z "$lock_pid" ] || ! kill -0 "$lock_pid" 2>/dev/null; then
+      log "removing stale X lock for display $GPU_XSERVER_DISPLAY (pid $lock_pid not running)"
+      rm -f "$LOCK_FILE" "$SOCK_FILE"
+    fi
+  fi
+
+  log "starting shared GPU Xorg on $GPU_XSERVER_DISPLAY ($RESOLUTION, $GPU_BUSID)"
+  Xorg "$GPU_XSERVER_DISPLAY" -config /etc/X11/xorg.conf -ac -nolisten tcp \
+       -novtswitch -sharevts -logfile /tmp/xorg.log vt1 &
+  XORG_PID=$!
+
+  for i in $(seq 1 40); do
+    if DISPLAY="$GPU_XSERVER_DISPLAY" as_app xset q >/dev/null 2>&1; then break; fi
+    if ! kill -0 "$XORG_PID" 2>/dev/null; then
+      log "ERROR: Xorg died during startup. Last log lines:"; tail -n 40 /tmp/xorg.log; exit 1
+    fi
+    sleep 0.5
+  done
+  if ! DISPLAY="$GPU_XSERVER_DISPLAY" as_app xset q >/dev/null 2>&1; then
+    log "ERROR: X server never became ready. Xorg log:"; tail -n 40 /tmp/xorg.log; exit 1
+  fi
+  log "shared GPU Xorg is up. Renderer: $(DISPLAY="$GPU_XSERVER_DISPLAY" as_app glxinfo 2>/dev/null | grep -m1 'OpenGL renderer' || echo 'glxinfo unavailable')"
+
+  wait "$XORG_PID"
+  exit $?
+fi
+
+# --- ROLE=instance (default) below ---
+
 cleanup() {
   log "shutting down..."
   obs_pid="$(pgrep -x obs || true)"
@@ -46,21 +124,9 @@ cleanup() {
     fi
   fi
   pkill -TERM -P $$ 2>/dev/null || true
-  [ -n "${XORG_PID:-}" ] && kill "$XORG_PID" 2>/dev/null || true
+  [ -n "${XVFB_PID:-}" ] && kill "$XVFB_PID" 2>/dev/null || true
 }
 trap cleanup TERM INT EXIT
-
-for dev in /dev/dri/card* /dev/dri/renderD*; do
-  [ -e "$dev" ] || continue
-  gid="$(stat -c '%g' "$dev")"
-  group="$(getent group "$gid" | cut -d: -f1)"
-  if [ -z "$group" ]; then
-    group="dri_$gid"
-    groupadd -g "$gid" "$group"
-  fi
-  usermod -aG "$group" app
-  log "granted app access to $dev (group $group, gid $gid)"
-done
 
 mkdir -p "$XDG" "$APP_HOME/.cache" "$APP_HOME/.config/obs-studio"
 chown -R app:app "$XDG" "$APP_HOME/.cache" "$APP_HOME/.config/obs-studio"
@@ -134,13 +200,22 @@ if [ -d "$EXTRA_PLUGINS_DIR/user-plugins" ]; then
   log "installed extra per-user plugins from $EXTRA_PLUGINS_DIR/user-plugins"
 fi
 
-sed -e "s/__WIDTH__/$WIDTH/" -e "s/__HEIGHT__/$HEIGHT/" \
-    -e "s#__BUSID__#$GPU_BUSID#" \
-    /etc/X11/xorg.conf.template > /etc/X11/xorg.conf
+# Link the shared gpu-xserver's X11 socket into our own (still
+# container-local) /tmp/.X11-unix under its fixed display number, so
+# `vglrun`/VGL_DISPLAY can reach it by the ordinary X11 unix-socket path
+# without needing to share all of /tmp/.X11-unix (which stays container-
+# local for CEF's own singleton socket) across every instance.
+mkdir -p /tmp/.X11-unix
+GPU_XSOCKET_BARE="${GPU_XSERVER_DISPLAY#:}"
+if [ -S "$GPU_XSOCKET_DIR/X${GPU_XSOCKET_BARE}" ]; then
+  ln -sf "$GPU_XSOCKET_DIR/X${GPU_XSOCKET_BARE}" "/tmp/.X11-unix/X${GPU_XSOCKET_BARE}"
+else
+  log "ERROR: shared GPU X server socket $GPU_XSOCKET_DIR/X${GPU_XSOCKET_BARE} not found - is the gpu-xserver container running?"
+  exit 1
+fi
 
-# A prior Xorg run can leave a stale lock behind if the container was
-# killed rather than stopped cleanly (restart: unless-stopped reuses the
-# same writable layer, so /tmp isn't wiped between runs).
+# A prior Xvfb run can leave a stale lock behind if the container was
+# killed rather than stopped cleanly.
 DISPLAY_NUM_BARE="${DISPLAY_NUM#:}"
 LOCK_FILE="/tmp/.X${DISPLAY_NUM_BARE}-lock"
 SOCK_FILE="/tmp/.X11-unix/X${DISPLAY_NUM_BARE}"
@@ -152,22 +227,34 @@ if [ -e "$LOCK_FILE" ]; then
   fi
 fi
 
-log "starting Xorg on $DISPLAY ($RESOLUTION, $GPU_BUSID)"
-Xorg "$DISPLAY" -config /etc/X11/xorg.conf -ac -nolisten tcp \
-     -novtswitch -sharevts -logfile /tmp/xorg.log vt1 &
-XORG_PID=$!
+log "starting Xvfb on $DISPLAY ($RESOLUTION)"
+Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" -nolisten tcp &
+XVFB_PID=$!
 
 for i in $(seq 1 40); do
   if as_app xset q >/dev/null 2>&1; then break; fi
-  if ! kill -0 "$XORG_PID" 2>/dev/null; then
-    log "ERROR: Xorg died during startup. Last log lines:"; tail -n 40 /tmp/xorg.log; exit 1
+  if ! kill -0 "$XVFB_PID" 2>/dev/null; then
+    log "ERROR: Xvfb died during startup."; exit 1
   fi
   sleep 0.5
 done
 if ! as_app xset q >/dev/null 2>&1; then
-  log "ERROR: X server never became ready. Xorg log:"; tail -n 40 /tmp/xorg.log; exit 1
+  log "ERROR: Xvfb never became ready."; exit 1
 fi
-log "X is up. Renderer: $(as_app glxinfo 2>/dev/null | grep -m1 'OpenGL renderer' || echo 'glxinfo unavailable')"
+log "Xvfb is up on $DISPLAY."
+
+# Hard-fail if VirtualGL can't reach the shared gpu-xserver and give us
+# real NVIDIA-accelerated rendering - better a loud startup failure than
+# a silent fallback to software/Mesa rendering that just looks slow.
+VGL_RENDERER="$(as_app env VGL_DISPLAY="$GPU_XSERVER_DISPLAY" vglrun +v glxinfo 2>&1 | grep -m1 'OpenGL renderer')"
+log "VirtualGL renderer check: ${VGL_RENDERER:-(no output from vglrun glxinfo)}"
+case "$VGL_RENDERER" in
+  *NVIDIA*) log "confirmed hardware-accelerated rendering via shared GPU X server" ;;
+  *)
+    log "ERROR: VirtualGL did not report an NVIDIA renderer - check that the gpu-xserver container is healthy"
+    exit 1
+    ;;
+esac
 
 as_app openbox &
 sleep 1
@@ -208,13 +295,19 @@ BWRAP_ARGS=(
   --ro-bind /usr /usr
   --ro-bind /etc /etc
 )
+# /usr/bin/vglrun (and friends) are symlinks into /opt/VirtualGL - bind the
+# real target too, since --ro-bind /usr above doesn't pull in /opt.
+[ -d /opt/VirtualGL ] && BWRAP_ARGS+=(--ro-bind /opt/VirtualGL /opt/VirtualGL)
+# /tmp/.X11-unix/X0 (below) is a symlink into the shared gpu-xserver socket
+# volume - bind the real target too, so the jail can actually resolve it.
+[ -d "$GPU_XSOCKET_DIR" ] && BWRAP_ARGS+=(--ro-bind "$GPU_XSOCKET_DIR" "$GPU_XSOCKET_DIR")
 # `--dev /dev` gives the jail its own minimal synthetic /dev (null, zero,
-# full, random, urandom, tty, pts, ...). On top of that we explicitly
-# allowlist only the GPU/NVENC device nodes OBS actually needs, instead of
-# binding the whole host /dev tree. /dev/video* (v4l2loopback, used for
-# OBS's virtual camera output) and /dev/snd (unused; audio goes over the
-# pulseaudio unix socket) are deliberately left out of the jail's view.
-for dev in /dev/dri/card* /dev/dri/renderD* /dev/nvidia*; do
+# full, random, urandom, tty, pts, ...). OBS's own GL rendering now goes
+# through the shared gpu-xserver via VirtualGL (see VGL_DISPLAY above), so
+# this jail no longer needs direct /dev/dri/* access - only /dev/nvidia*
+# for NVENC hardware encode, which is a separate CUDA/NVENC context
+# unrelated to display/modesetting ownership.
+for dev in /dev/nvidia*; do
   [ -e "$dev" ] && BWRAP_ARGS+=(--dev-bind "$dev" "$dev")
 done
 [ -d /sys ] && BWRAP_ARGS+=(--ro-bind /sys /sys)
@@ -251,6 +344,7 @@ BWRAP_ARGS+=(
   # so CEF uses it for IPC/shared memory (do NOT add --disable-dev-shm-usage:
   # it forces shm onto /tmp).
   --setenv OBS_BROWSER_EXTRA_FLAGS "--no-sandbox --disable-gpu"
+  --setenv VGL_DISPLAY "$GPU_XSERVER_DISPLAY"
 )
 
 # Settings lockdown was tried here as read-only bwrap binds over
@@ -288,9 +382,9 @@ BWRAP_ARGS+=(
 # (GPU/NVENC access goes through the device driver, not mount permissions).
 BWRAP_ARGS+=(--remount-ro /dev --remount-ro /)
 
-log "launching OBS (idle, no auto-stream), jailed via bwrap"
+log "launching OBS (idle, no auto-stream), jailed via bwrap, rendering via VirtualGL"
 rm -rf "$APP_HOME/.config/obs-studio/.sentinel" 2>/dev/null || true
-as_app dbus-run-session -- bwrap "${BWRAP_ARGS[@]}" obs --disable-missing-files-check &
+as_app dbus-run-session -- bwrap "${BWRAP_ARGS[@]}" vglrun obs --disable-missing-files-check &
 OBS_PID=$!
 
 ( for i in $(seq 1 30); do
@@ -301,5 +395,9 @@ OBS_PID=$!
     fi
     sleep 1
   done ) &
+
+# Auto-confirm Twitch Enhanced Broadcasting go-live warnings so obs-websocket
+# stream starts don't hang on a modal nobody can click.
+as_app /usr/local/bin/obs-go-live-autoconfirm.sh &
 
 wait "$OBS_PID"

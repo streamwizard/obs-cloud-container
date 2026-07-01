@@ -1,12 +1,39 @@
 services:
+  gpu-xserver:
+    build: .
+    image: obs-cloud-container:latest
+    container_name: gpu-xserver-1
+    init: true
+    restart: unless-stopped
+    runtime: nvidia
+    # No SYS_ADMIN/NET_ADMIN/SYS_PTRACE/unconfined apparmor+seccomp here:
+    # this container never runs bwrap (no OBS, no browser-source jail), so
+    # it needs none of the capabilities that combination exists for.
+    environment:
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: all
+      ROLE: "gpu-xserver"
+      RESOLUTION: "1920x1080"
+      GPU_BUSID: "PCI:0:16:0"
+    volumes:
+      # This is the one real Xorg bound to the physical GPU (see
+      # ROLE=gpu-xserver in entrypoint.sh) - its X11 socket lives here and
+      # is shared read-only into every obs-kiosk instance below, so their
+      # `vglrun`-wrapped OBS processes can render through it instead of
+      # each owning the GPU's display/modesetting themselves.
+      - gpu-x11-socket:/tmp/.X11-unix
+    stop_grace_period: 10s
+
   obs-kiosk:
     build: .
-    image: .
+    image: obs-cloud-container:latest
     container_name: obs-kiosk-1
     init: true
     restart: unless-stopped
     runtime: nvidia
     shm_size: "2gb"
+    depends_on:
+      - gpu-xserver
     cap_add:
       - SYS_ADMIN
       - NET_ADMIN
@@ -25,7 +52,6 @@ services:
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: all
       RESOLUTION: "1920x1080"
-      GPU_BUSID: "PCI:0:16:0"
       OBS_WEBSOCKET_PASSWORD: "${OBS_WEBSOCKET_PASSWORD:-}"
     ports:
       - "6080:6080"
@@ -33,6 +59,9 @@ services:
       - "4455:4455"
     volumes:
       - obs-config:/home/app/.config/obs-studio
+      # Read-only: this instance only ever consumes the shared GPU
+      # X server's socket, never creates it.
+      - gpu-x11-socket:/opt/gpu-xsocket:ro
       # Drop extra OBS plugins here without rebuilding the image: .so
       # binaries under obs-plugins/ and any companion locale/data files
       # under data/ get copied into the real OBS plugin paths by
@@ -42,3 +71,4 @@ services:
 
 volumes:
   obs-config:
+  gpu-x11-socket:
