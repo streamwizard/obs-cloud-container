@@ -270,8 +270,21 @@ as_app pulseaudio -n --file="$XDG/headless.pa" --exit-idle-time=-1 --daemonize=y
 sleep 1
 as_app pactl info >/dev/null 2>&1 && log "pulse up (sink: obs_sink)" || log "pulse unavailable (non-fatal; browser-source audio is internal to OBS)"
 
+# Every instance shares obs-net with every other instance on the node, so
+# without auth any container could dial another instance's x11vnc directly
+# (bypassing obs-instance-manager's WS proxy/ownership checks entirely) and
+# get full keyboard/mouse control of a different tenant's OBS session. A
+# per-instance password, generated here if the caller didn't supply one
+# (mirrors OBS_WEBSOCKET_PASSWORD above), closes that off.
+if [ -z "${VNC_PASSWORD:-}" ]; then
+  VNC_PASSWORD="$(head -c 24 /dev/urandom | base64)"
+  log "no VNC_PASSWORD set; generated a random password (not logged)"
+fi
+VNC_PASSFILE="$XDG/vncpasswd"
+as_app x11vnc -storepasswd "$VNC_PASSWORD" "$VNC_PASSFILE"
+
 log "starting x11vnc on :$VNC_PORT and noVNC on :$NOVNC_PORT"
-as_app x11vnc -display "$DISPLAY" -forever -shared -nopw -noshm -noxdamage \
+as_app x11vnc -display "$DISPLAY" -forever -shared -rfbauth "$VNC_PASSFILE" -noshm -noxdamage \
        -repeat -rfbport "$VNC_PORT" -quiet &
 for i in $(seq 1 20); do
   (exec 3<>/dev/tcp/127.0.0.1/"$VNC_PORT") 2>/dev/null && { exec 3>&- 3<&-; break; }
