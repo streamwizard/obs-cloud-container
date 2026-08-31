@@ -39,6 +39,7 @@ RUN apt-get update \
         openbox \
         x11vnc \
         websockify \
+        autocutsel \
         wmctrl xdotool \
         dbus-x11 \
         pulseaudio pulseaudio-utils \
