@@ -260,6 +260,13 @@ as_app openbox &
 sleep 1
 as_app xsetroot -solid black
 
+# Mirror PRIMARY and CLIPBOARD selections. x11vnc's cut-text bridging and the
+# mix of Qt (CLIPBOARD) and CEF widgets inside OBS each favor one selection;
+# without a sync daemon a paste target can read the one that was never set,
+# which shows up as "clipboard randomly does nothing" in the viewer.
+as_app autocutsel -selection CLIPBOARD -fork
+as_app autocutsel -selection PRIMARY -fork
+
 cat > "$XDG/headless.pa" <<'PA'
 load-module module-native-protocol-unix
 load-module module-null-sink sink_name=obs_sink sink_properties=device.description=OBS_Output
