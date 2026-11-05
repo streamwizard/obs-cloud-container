@@ -53,9 +53,17 @@ services:
       NVIDIA_DRIVER_CAPABILITIES: all
       RESOLUTION: "1920x1080"
       OBS_WEBSOCKET_PASSWORD: "${OBS_WEBSOCKET_PASSWORD:-}"
+      # Basic-auth password for the Selkies viewer (user "app").
+      SELKIES_BASIC_AUTH_PASSWORD: "${SELKIES_BASIC_AUTH_PASSWORD:-}"
+      SELKIES_ENCODER: "h264enc-striped"
+      SELKIES_FRAMERATE: "30-30"
+      SELKIES_VIDEO_CRF: "30-30"
+      SELKIES_AUDIO_DEVICE_NAME: "obs_sink.monitor"
+      SELKIES_MANUAL_RESOLUTION: "true|locked"
+      SELKIES_MANUAL_WIDTH: "1920"
+      SELKIES_MANUAL_HEIGHT: "1080"
     ports:
-      - "6080:6080"
-      - "5900:5900"
+      - "8080:8080"
       - "4455:4455"
     volumes:
       - obs-config:/home/app/.config/obs-studio

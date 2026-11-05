@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 # Builds the appliance-lockdown OBS frontend plugin (plugin/) against the
 # same PPA's libobs-dev/obs-frontend-api headers, so OBS itself stays an
 # unmodified binary install below - only this small .so is compiled.
@@ -37,9 +38,8 @@ RUN apt-get update \
         x11-xserver-utils \
         xauth \
         openbox \
-        x11vnc \
-        websockify \
         autocutsel \
+        xclip \
         wmctrl xdotool \
         dbus-x11 \
         pulseaudio pulseaudio-utils \
@@ -49,6 +49,9 @@ RUN apt-get update \
         bubblewrap \
         rsync \
         wget \
+        curl \
+        libegl1 \
+        libgles2 \
         obs-studio \
  && apt-get purge -y software-properties-common gpg-agent \
  && apt-get autoremove -y \
@@ -68,6 +71,30 @@ RUN wget -q "https://github.com/VirtualGL/virtualgl/releases/download/${VIRTUALG
  && apt-get purge -y wget \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
+
+# Selkies streams the instance's desktop and OBS audio to the browser
+# (replaces x11vnc + websockify + noVNC, Jira SW-202). The .deb is a
+# self-contained venv under /opt/selkies; --checksum pins the exact build.
+ARG SELKIES_VERSION=2.2.1
+ARG SELKIES_SHA256=4bc87969acf45951fbf6148b9d7e23717df58411e5a47d361b99b78842caaa8c
+ADD --checksum=sha256:${SELKIES_SHA256} \
+    https://github.com/selkies-project/selkies/releases/download/${SELKIES_VERSION}/selkies-${SELKIES_VERSION}-ubuntu24.04-amd64.deb \
+    /tmp/selkies.deb
+RUN chmod 644 /tmp/selkies.deb \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends /tmp/selkies.deb \
+ && rm -rf /var/lib/apt/lists/* /tmp/selkies.deb
+
+# Turn off pcmflux's silence gate. Selkies hard-codes it on, so frames of
+# pure digital silence are not sent at all. Over WebSocket that empties the
+# browser's jitter buffer on every silent stretch, and it underruns on each
+# resume: OBS audio near the noise floor (quiet sources, gaps between clips)
+# turns into constant crackle. The grep fails the build if a Selkies upgrade
+# moves the line.
+RUN sed -i 's/^\(\s*capture\.use_silence_gate = \)True/\1False/' \
+        /opt/selkies/lib/python3.12/site-packages/selkies/audio_control.py \
+ && grep -q 'capture.use_silence_gate = False' \
+        /opt/selkies/lib/python3.12/site-packages/selkies/audio_control.py
 
 # Plugins are supplied at runtime via the OBS config S3 template
 # (obs-templates/default/plugins/) which pullObsConfig merges into every
@@ -104,5 +131,6 @@ COPY --from=plugin-builder /src/plugin/build/appliance-lockdown.so \
 RUN chown root:root /usr/lib/x86_64-linux-gnu/obs-plugins/appliance-lockdown.so \
  && chmod 644 /usr/lib/x86_64-linux-gnu/obs-plugins/appliance-lockdown.so
 
-EXPOSE 6080 5900 4455
+# 8080 = Selkies (web client + /api/websockets), 4455 = obs-websocket
+EXPOSE 8080 4455
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
