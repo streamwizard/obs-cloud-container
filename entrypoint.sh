@@ -18,8 +18,7 @@ ROLE="${ROLE:-instance}"
 DISPLAY_NUM="${DISPLAY_NUM:-:10}"
 RESOLUTION="${RESOLUTION:-1920x1080}"
 GPU_BUSID="${GPU_BUSID:-PCI:0:16:0}"
-VNC_PORT="${VNC_PORT:-5900}"
-NOVNC_PORT="${NOVNC_PORT:-6080}"
+SELKIES_PORT="${SELKIES_PORT:-8080}"
 WS_PORT="${OBS_WEBSOCKET_PORT:-4455}"
 WIDTH="${RESOLUTION%x*}"
 HEIGHT="${RESOLUTION#*x}"
@@ -123,6 +122,7 @@ cleanup() {
       kill -KILL "$obs_pid" 2>/dev/null || true
     fi
   fi
+  [ -n "${SELKIES_PID:-}" ] && kill -TERM "$SELKIES_PID" 2>/dev/null || true
   pkill -TERM -P $$ 2>/dev/null || true
   [ -n "${XVFB_PID:-}" ] && kill "$XVFB_PID" 2>/dev/null || true
 }
@@ -227,8 +227,14 @@ if [ -e "$LOCK_FILE" ]; then
   fi
 fi
 
-log "starting Xvfb on $DISPLAY ($RESOLUTION)"
-Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" -nolisten tcp &
+# Xvfb runs as app, not root: the container's root lacks CAP_IPC_OWNER, so
+# a root-owned Xvfb cannot attach MIT-SHM segments that app-owned clients
+# create, and Selkies' screen capture (pixelflux) then never starts. -s 0
+# -dpms stops the 10-minute screen blanking, which Selkies would stream as
+# black; -noreset keeps the server up between client generations.
+chmod 1777 /tmp/.X11-unix
+log "starting Xvfb on $DISPLAY ($RESOLUTION) as app"
+as_app Xvfb "$DISPLAY" -screen 0 "${WIDTH}x${HEIGHT}x24" -nolisten tcp -noreset -s 0 -dpms &
 XVFB_PID=$!
 
 for i in $(seq 1 40); do
@@ -260,13 +266,24 @@ as_app openbox &
 sleep 1
 as_app xsetroot -solid black
 
-# Mirror PRIMARY and CLIPBOARD selections. x11vnc's cut-text bridging and the
+# Mirror PRIMARY and CLIPBOARD selections. The viewer's clipboard bridging and the
 # mix of Qt (CLIPBOARD) and CEF widgets inside OBS each favor one selection;
 # without a sync daemon a paste target can read the one that was never set,
 # which shows up as "clipboard randomly does nothing" in the viewer.
 as_app autocutsel -selection CLIPBOARD -fork
 as_app autocutsel -selection PRIMARY -fork
 
+# PulseAudio with a null sink as the default output. OBS audio monitoring
+# plays into obs_sink, and Selkies streams obs_sink.monitor to the browser.
+# 48 kHz is what OBS mixes at and what Opus wants, so nothing is resampled
+# twice on the way.
+mkdir -p "$APP_HOME/.config/pulse"
+cat > "$APP_HOME/.config/pulse/daemon.conf" <<'CONF'
+default-sample-rate = 48000
+alternate-sample-rate = 48000
+avoid-resampling = yes
+CONF
+chown -R app:app "$APP_HOME/.config/pulse"
 cat > "$XDG/headless.pa" <<'PA'
 load-module module-native-protocol-unix
 load-module module-null-sink sink_name=obs_sink sink_properties=device.description=OBS_Output
@@ -276,28 +293,6 @@ chown app:app "$XDG/headless.pa"
 as_app pulseaudio -n --file="$XDG/headless.pa" --exit-idle-time=-1 --daemonize=yes 2>/dev/null || true
 sleep 1
 as_app pactl info >/dev/null 2>&1 && log "pulse up (sink: obs_sink)" || log "pulse unavailable (non-fatal; browser-source audio is internal to OBS)"
-
-# Every instance shares obs-net with every other instance on the node, so
-# without auth any container could dial another instance's x11vnc directly
-# (bypassing obs-instance-manager's WS proxy/ownership checks entirely) and
-# get full keyboard/mouse control of a different tenant's OBS session. A
-# per-instance password, generated here if the caller didn't supply one
-# (mirrors OBS_WEBSOCKET_PASSWORD above), closes that off.
-if [ -z "${VNC_PASSWORD:-}" ]; then
-  VNC_PASSWORD="$(head -c 24 /dev/urandom | base64)"
-  log "no VNC_PASSWORD set; generated a random password (not logged)"
-fi
-VNC_PASSFILE="$XDG/vncpasswd"
-as_app x11vnc -storepasswd "$VNC_PASSWORD" "$VNC_PASSFILE"
-
-log "starting x11vnc on :$VNC_PORT and noVNC on :$NOVNC_PORT"
-as_app x11vnc -display "$DISPLAY" -forever -shared -rfbauth "$VNC_PASSFILE" -noshm -noxdamage \
-       -repeat -rfbport "$VNC_PORT" -quiet &
-for i in $(seq 1 20); do
-  (exec 3<>/dev/tcp/127.0.0.1/"$VNC_PORT") 2>/dev/null && { exec 3>&- 3<&-; break; }
-  sleep 0.5
-done
-websockify "$NOVNC_PORT" "localhost:$VNC_PORT" >/tmp/websockify.log 2>&1 &
 
 mkdir -p "$APP_HOME/media"
 chown app:app "$APP_HOME/media"
@@ -404,7 +399,13 @@ BWRAP_ARGS+=(--remount-ro /dev --remount-ro /)
 
 log "launching OBS (idle, no auto-stream), jailed via bwrap, rendering via VirtualGL"
 rm -rf "$APP_HOME/.config/obs-studio/.sentinel" 2>/dev/null || true
-as_app dbus-run-session -- bwrap "${BWRAP_ARGS[@]}" vglrun obs --disable-missing-files-check &
+# PULSE_LATENCY_MSEC: OBS's monitoring stream asks Pulse for ~11 ms of
+# buffer but writes one 1024-sample (21.3 ms) chunk per audio tick, so it
+# underran every tick and obs_sink.monitor carried a ~7 ms hole every 1024
+# samples, which Selkies plays as crackle. 60 ms keeps the buffer above one
+# tick. The encoded stream output never touches Pulse, so it is unaffected.
+as_app env PULSE_LATENCY_MSEC="${OBS_PULSE_LATENCY_MSEC:-60}" \
+  dbus-run-session -- bwrap "${BWRAP_ARGS[@]}" vglrun obs --disable-missing-files-check &
 OBS_PID=$!
 
 ( for i in $(seq 1 30); do
@@ -419,5 +420,52 @@ OBS_PID=$!
 # Auto-confirm Twitch Enhanced Broadcasting go-live warnings so obs-websocket
 # stream starts don't hang on a modal nobody can click.
 as_app /usr/local/bin/obs-go-live-autoconfirm.sh &
+
+# Selkies streams the desktop and obs_sink.monitor to the browser. Every
+# instance shares obs-net with every other instance on the node, so basic
+# auth stays on with a per-instance password: without it any container
+# could reach another tenant's desktop directly. obs-instance-manager
+# passes the password in and adds the Authorization header on its
+# ticket-gated proxy, so the browser never sees it.
+#
+# The env below is fixed here rather than taken from the caller:
+# - websockets only (no WebRTC/TURN) and plain HTTP (TLS ends at the
+#   Cloudflare tunnel in front of the node),
+# - CPU encoding only: the GPU's NVENC sessions are kept for OBS's own
+#   stream output, so Selkies must never open one.
+# Every other SELKIES_* var the container was started with (encoder,
+# framerate, UI, audio device, resolution lock) is forwarded as is.
+SELKIES_BASIC_AUTH_PASSWORD="${SELKIES_BASIC_AUTH_PASSWORD:-}"
+if [ -z "$SELKIES_BASIC_AUTH_PASSWORD" ]; then
+  SELKIES_BASIC_AUTH_PASSWORD="$(head -c 24 /dev/urandom | base64)"
+  log "no SELKIES_BASIC_AUTH_PASSWORD set; generated a random one (not logged), the viewer will be unreachable through the manager"
+fi
+mapfile -t SELKIES_ENV < <(env | grep '^SELKIES_' | grep -v '^SELKIES_BASIC_AUTH_PASSWORD=')
+
+log "starting Selkies on :$SELKIES_PORT"
+as_app env \
+  "${SELKIES_ENV[@]}" \
+  USER=app \
+  SELKIES_ENABLE_BASIC_AUTH=true \
+  SELKIES_BASIC_AUTH_USER=app \
+  SELKIES_BASIC_AUTH_PASSWORD="$SELKIES_BASIC_AUTH_PASSWORD" \
+  SELKIES_ENABLE_HTTPS=false \
+  SELKIES_MODE=websockets \
+  SELKIES_USE_CPU="true|locked" \
+  SELKIES_GPU_ID=-1 \
+  PULSE_RUNTIME_PATH="$XDG/pulse" \
+  LANG=C.UTF-8 \
+  selkies --public --port="$SELKIES_PORT" &
+SELKIES_PID=$!
+
+( for i in $(seq 1 60); do
+    if curl -fsS "http://127.0.0.1:$SELKIES_PORT/api/health" >/dev/null 2>&1; then
+      log "Selkies ready on :$SELKIES_PORT"
+      exit 0
+    fi
+    kill -0 "$SELKIES_PID" 2>/dev/null || { log "ERROR: Selkies exited during startup"; exit 1; }
+    sleep 0.5
+  done
+  log "WARNING: Selkies not healthy after 30 s" ) &
 
 wait "$OBS_PID"
