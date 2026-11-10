@@ -9,7 +9,7 @@ find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
 find_package(libobs REQUIRED)
 find_package(obs-frontend-api REQUIRED)
 
-add_library(appliance-lockdown MODULE src/lockdown-plugin.cpp)
+add_library(appliance-lockdown MODULE src/lockdown-plugin.cpp src/file-dialog-guard.cpp)
 
 target_link_libraries(appliance-lockdown
     PRIVATE

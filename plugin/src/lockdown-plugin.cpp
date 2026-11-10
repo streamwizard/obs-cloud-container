@@ -4,8 +4,9 @@
 // widgets from the OBS main window, clears every registered hotkey's key
 // bindings (including Start/Stop Streaming - this appliance only needs
 // streaming controllable via the UI button and obs-websocket, not a
-// physical key combo), and reacts to recording/replay-buffer start as a
-// fallback kill-switch. This does NOT replace the other lockdown layers
+// physical key combo), reacts to recording/replay-buffer start as a
+// fallback kill-switch, and keeps file dialogs inside the media folder
+// (file-dialog-guard.cpp). This does NOT replace the other lockdown layers
 // (obs-websocket auth, unwritable recording output path) - obs-websocket
 // and any other in-process caller still reach
 // obs_frontend_recording_start()/etc directly, bypassing the UI and hotkeys
@@ -30,6 +31,9 @@
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 
+#include "file-dialog-guard.hpp"
+
+#include <QDir>
 #include <QMainWindow>
 #include <QAction>
 #include <QAbstractButton>
@@ -321,6 +325,9 @@ void OnFrontendEvent(enum obs_frontend_event event, void *)
 		// Vertical canvas: hide record/replay/vcam/gear/donate/link buttons
 		LockdownVerticalCanvas(win);
 		DisableAllHotkeys();
+		// File pickers: only the media folder the dashboard uploads to
+		// (bind-mounted by obs-instance-manager, see entrypoint.sh jail).
+		InstallFileDialogGuard(QDir::homePath() + QStringLiteral("/media"));
 		break;
 	}
 	case OBS_FRONTEND_EVENT_RECORDING_STARTING:
