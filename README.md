@@ -32,6 +32,15 @@ ticket-gated proxy.
 - The pcmflux silence gate is patched off at build time (see `Dockerfile`);
   with it on, quiet OBS audio crackles in the browser.
 
+## Sources
+
+The image leaves out the OBS modules whose sources can't work in a headless
+container: audio capture (ALSA, PulseAudio input/output, JACK), display and
+window capture, and video capture devices (PipeWire, V4L2). Add Source offers
+Browser, Color, Image, Image Slide Show, Media, Scene, Text, and whatever the
+S3 plugins add (Source Clone). A scene collection that still has one of the
+removed sources keeps it; OBS logs it as an unknown source type.
+
 ## Image
 
 Published to GHCR on every push to `main` and on version tags:
