@@ -27,6 +27,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=all
 
+# The OBS modules removed after the install only add sources that can't work
+# in a headless container (no camera, mic or sound card; the only screen is
+# OBS itself): ALSA, PulseAudio input/output capture, JACK, display and
+# window capture, PipeWire and V4L2 video capture. Audio monitoring into
+# obs_sink is part of libobs, not the PulseAudio module, so the viewer keeps
+# its sound. The build fails if a module is missing, so a packaging change
+# can't silently bring the sources back under a new path.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
         ca-certificates software-properties-common gpg-agent \
@@ -53,6 +60,12 @@ RUN apt-get update \
         libegl1 \
         libgles2 \
         obs-studio \
+ && for m in linux-alsa linux-pulseaudio linux-jack linux-capture linux-pipewire linux-v4l2; do \
+        test -f "/usr/lib/x86_64-linux-gnu/obs-plugins/$m.so" \
+            || { echo "OBS module $m not found; update this list" >&2; exit 1; }; \
+        rm -f "/usr/lib/x86_64-linux-gnu/obs-plugins/$m.so"; \
+        rm -rf "/usr/share/obs/obs-plugins/$m"; \
+    done \
  && apt-get purge -y software-properties-common gpg-agent \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
